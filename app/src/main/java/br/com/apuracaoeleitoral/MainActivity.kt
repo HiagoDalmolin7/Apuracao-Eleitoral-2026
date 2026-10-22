@@ -1,9 +1,14 @@
 package br.com.apuracaoeleitoral
 
 import android.os.Bundle
+import android.util.Base64
+import java.io.ByteArrayInputStream
+import java.util.zip.GZIPInputStream
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -18,6 +23,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
@@ -25,10 +36,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.json.JSONObject
+import org.json.JSONArray
 import java.text.NumberFormat
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 
 // Cores identificadoras dos candidatos. Números e percentuais permanecem pretos.
 private val Verde = Color(0xFF198754)
@@ -225,6 +238,13 @@ private fun ElectionApp() {
                     NavigationBarItem(
                         selected = tab == 2,
                         onClick = { tab = 2 },
+                        icon = { Text("◇", fontSize = 20.sp) },
+                        label = { Text("Mapa") },
+                        colors = NavigationBarItemDefaults.colors(selectedIconColor = Azul, selectedTextColor = Azul, indicatorColor = Color(0xFFEAF0FB))
+                    )
+                    NavigationBarItem(
+                        selected = tab == 3,
+                        onClick = { tab = 3 },
                         icon = { Text("◉", fontSize = 20.sp) },
                         label = { Text("Estatísticas") },
                         colors = NavigationBarItemDefaults.colors(selectedIconColor = Azul, selectedTextColor = Azul, indicatorColor = Color(0xFFEAF0FB))
@@ -250,6 +270,12 @@ private fun ElectionApp() {
                     result = computed.getValue(selectedUF),
                     update = ::update,
                     all = computed
+                )
+                2 -> MapPage(
+                    modifier = Modifier.padding(padding),
+                    candidateA = candidateA, candidateB = candidateB,
+                    computed = computed,
+                    editState = { uf -> selectedUF = uf; tab = 1 }
                 )
                 else -> StatisticsPage(
                     modifier = Modifier.padding(padding),
@@ -572,5 +598,198 @@ private fun SummaryLine(label: String, value: String) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
         Text(label, modifier = Modifier.weight(1f), fontSize = 13.sp, color = Secundario)
         Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Tinta)
+    }
+}
+
+
+// Mapa vetorial simplificado por UF. Fonte: Brazilian States TopoJSON, ppKrauss/ruliana,
+// licença MIT: https://gist.github.com/ppKrauss/0c33364240e841fa23e78b21005f792c
+// Os polígonos são embarcados no app (não há necessidade de internet ou API).
+private const val BR_MAP_GZIP_BASE64 = "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"
+
+private data class UfOutline(val uf: String, val points: List<Offset>)
+
+private fun readBrazilMap(): List<UfOutline> {
+    val compressed = Base64.decode(BR_MAP_GZIP_BASE64, Base64.DEFAULT)
+    val jsonText = GZIPInputStream(ByteArrayInputStream(compressed))
+        .bufferedReader(Charsets.UTF_8).use { it.readText() }
+    val raw = JSONObject(jsonText)
+    val arcsJson = raw.getJSONArray("arcs")
+    val arcs = (0 until arcsJson.length()).map { index ->
+        val encoded = arcsJson.getJSONArray(index)
+        var x = 0
+        var y = 0
+        (0 until encoded.length()).map { p ->
+            val delta = encoded.getJSONArray(p)
+            x += delta.getInt(0)
+            y += delta.getInt(1)
+            Offset(x.toFloat(), y.toFloat())
+        }
+    }
+    val shapes = raw.getJSONArray("geometries")
+    return (0 until shapes.length()).map { index ->
+        val entry = shapes.getJSONArray(index)
+        val uf = entry.getString(0)
+        val refs = entry.getJSONArray(1)
+        val points = mutableListOf<Offset>()
+        for (r in 0 until refs.length()) {
+            val id = refs.getInt(r)
+            val arc = if (id >= 0) arcs[id] else arcs[-id - 1].asReversed()
+            // Consecutive arcs share their endpoints: avoid duplicate vertices.
+            points.addAll(if (points.isEmpty()) arc else arc.drop(1))
+        }
+        UfOutline(uf, points)
+    }
+}
+
+// Ray-casting hit test: detects the state touched on the real polygon.
+private fun insidePolygon(point: Offset, polygon: List<Offset>): Boolean {
+    var inside = false
+    var j = polygon.lastIndex
+    for (i in polygon.indices) {
+        val a = polygon[i]
+        val b = polygon[j]
+        if ((a.y > point.y) != (b.y > point.y)) {
+            val intersection = (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x
+            if (point.x < intersection) inside = !inside
+        }
+        j = i
+    }
+    return inside
+}
+
+private fun mapColor(result: Estimate): Color {
+    if (!result.valid || result.validos <= 0) return Color(0xFFE2E7ED)
+    // A proporção é entre os dois candidatos no próprio estado.
+    val shareA = (result.a / result.validos).toFloat().coerceIn(0f, 1f)
+    return lerp(Vermelho, Verde, shareA)
+}
+
+@Composable
+private fun BrazilStateMap(
+    geometry: List<UfOutline>,
+    estimates: Map<String, Estimate>,
+    selected: String,
+    onSelected: (String) -> Unit
+) {
+    Canvas(
+        modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xFFF9FBFD))
+            .pointerInput(geometry) {
+                detectTapGestures { tap ->
+                    val square = min(size.width, size.height).toFloat() * 0.95f
+                    val left = (size.width - square) / 2f
+                    val top = (size.height - square) / 2f
+                    val geo = Offset(
+                        (tap.x - left) / square * 10000f,
+                        10000f - (tap.y - top) / square * 10000f
+                    )
+                    // Reversed order lets small polygons (DF, SE etc.) win near borders.
+                    geometry.asReversed().firstOrNull { insidePolygon(geo, it.points) }
+                        ?.let { onSelected(it.uf) }
+                }
+            }
+    ) {
+        val square = min(size.width, size.height) * 0.95f
+        val left = (size.width - square) / 2f
+        val top = (size.height - square) / 2f
+        geometry.forEach { state ->
+            val path = Path()
+            state.points.forEachIndexed { i, point ->
+                val x = left + point.x / 10000f * square
+                val y = top + (10000f - point.y) / 10000f * square
+                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            path.close()
+            drawPath(path, color = mapColor(estimates.getValue(state.uf)))
+            drawPath(
+                path,
+                color = if (selected == state.uf) Azul else Color.White,
+                style = Stroke(width = if (selected == state.uf) 2.8.dp.toPx() else 1.dp.toPx())
+            )
+        }
+    }
+}
+
+@Composable
+private fun MapPage(
+    modifier: Modifier,
+    candidateA: String, candidateB: String,
+    computed: Map<String, Estimate>,
+    editState: (String) -> Unit
+) {
+    val geometry = remember { readBrazilMap() }
+    var picked by remember { mutableStateOf("SC") }
+    var expanded by remember { mutableStateOf(false) }
+    val current = computed.getValue(picked)
+    val reported = computed.values.count { it.valid }
+    ContentColumn(modifier) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Mapa da apuração", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("Toque em um estado para ver sua projeção.", fontSize = 13.sp, color = Secundario)
+        }
+        SurfaceCard {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Brasil por estado", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text("$reported/27 UFs", fontSize = 12.sp, color = Secundario)
+            }
+            BrazilStateMap(geometry, computed, picked, onSelected = { picked = it })
+            Text("Cores proporcionais aos votos válidos informados em cada UF.", fontSize = 12.sp, color = Secundario)
+            Box(
+                Modifier.fillMaxWidth().height(13.dp).clip(RoundedCornerShape(99.dp))
+                    .background(Brush.horizontalGradient(listOf(Vermelho, lerp(Vermelho, Verde, .5f), Verde)))
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("100% $candidateB", fontSize = 11.sp, color = Tinta)
+                Text("50% / 50%", fontSize = 11.sp, color = Tinta)
+                Text("100% $candidateA", fontSize = 11.sp, color = Tinta)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(Modifier.size(11.dp).background(Color(0xFFE2E7ED), RoundedCornerShape(3.dp)))
+                Text("Cinza = estado sem dados suficientes", fontSize = 12.sp, color = Secundario)
+            }
+        }
+        SurfaceCard {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                Column {
+                    Text("Estado selecionado", fontSize = 12.sp, color = Secundario)
+                    Text(picked, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                }
+                Box {
+                    OutlinedButton(onClick = { expanded = true }) { Text("Trocar UF  ⌄") }
+                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                        UFS.forEach { uf ->
+                            DropdownMenuItem(text = { Text(uf) }, onClick = { picked = uf; expanded = false })
+                        }
+                    }
+                }
+            }
+            Text("Urnas apuradas: ${percentage(current.urnas)}", fontSize = 13.sp, color = Tinta, fontWeight = FontWeight.Medium)
+            LinearProgressIndicator(
+                progress = { (current.urnas / 100).toFloat().coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(99.dp)),
+                color = Azul,
+                trackColor = Color(0xFFE8EDF4)
+            )
+            if (current.valid) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    CandidateInfo(candidateA, current.a, current.a / current.validos, Verde, Modifier.weight(1f))
+                    CandidateInfo(candidateB, current.b, current.b / current.validos, Vermelho, Modifier.weight(1f))
+                }
+                RatioBar(current.a, current.b, thickness = 12)
+                HorizontalDivider(color = Borda)
+                SummaryLine("Votos válidos projetados", count(current.validos))
+                SummaryLine("Votos observados", count(current.observedA + current.observedB))
+                if (current.warning.isNotBlank()) Note(current.warning)
+            } else {
+                Text("Sem votos suficientes para projetar esta UF. Informe o percentual de urnas e os votos dos candidatos.", color = Secundario, fontSize = 13.sp)
+            }
+            Button(onClick = { editState(picked) }, modifier = Modifier.fillMaxWidth()) {
+                Text("${if (current.valid) "Atualizar" else "Preencher"} dados de $picked")
+            }
+        }
+        Note("MAPA NÃO OFICIAL • A mistura de cores mostra apenas a proporção dos votos válidos de cada UF. Não representa o percentual de urnas apuradas e não prevê mudanças nas urnas restantes.")
+        Text("Geometria simplificada dos estados (TopoJSON, licença MIT), disponível no app sem internet.", color = Secundario, fontSize = 11.sp)
     }
 }
