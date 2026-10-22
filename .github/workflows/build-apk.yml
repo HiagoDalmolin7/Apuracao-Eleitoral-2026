@@ -23,8 +23,11 @@ jobs:
       - name: Preparar Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Instalar Android SDK 37
-        run: sdkmanager "platforms;android-37" "build-tools;36.0.0"
+      - name: Instalar Android SDK 37.2
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/android" sdk install \
+            "platforms/android-37.2" "build-tools/36.0.0"
+          test -f "$ANDROID_HOME/platforms/android-37.2/android.jar"
 
       - name: Configurar Gradle 9.8.2
         uses: gradle/actions/setup-gradle@v6
