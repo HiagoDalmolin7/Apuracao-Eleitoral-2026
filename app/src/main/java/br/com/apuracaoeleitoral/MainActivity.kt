@@ -26,9 +26,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
@@ -220,35 +223,26 @@ private fun ElectionApp() {
                 )
             },
             bottomBar = {
-                NavigationBar(containerColor = Color.White, tonalElevation = 0.dp) {
-                    NavigationBarItem(
-                        selected = tab == 0,
-                        onClick = { tab = 0 },
-                        icon = { Text("▦", fontSize = 20.sp) },
-                        label = { Text("Painel") },
-                        colors = NavigationBarItemDefaults.colors(selectedIconColor = Azul, selectedTextColor = Azul, indicatorColor = Color(0xFFEAF0FB))
-                    )
-                    NavigationBarItem(
-                        selected = tab == 1,
-                        onClick = { tab = 1 },
-                        icon = { Text("☷", fontSize = 20.sp) },
-                        label = { Text("Estados") },
-                        colors = NavigationBarItemDefaults.colors(selectedIconColor = Azul, selectedTextColor = Azul, indicatorColor = Color(0xFFEAF0FB))
-                    )
-                    NavigationBarItem(
-                        selected = tab == 2,
-                        onClick = { tab = 2 },
-                        icon = { Text("◇", fontSize = 20.sp) },
-                        label = { Text("Mapa") },
-                        colors = NavigationBarItemDefaults.colors(selectedIconColor = Azul, selectedTextColor = Azul, indicatorColor = Color(0xFFEAF0FB))
-                    )
-                    NavigationBarItem(
-                        selected = tab == 3,
-                        onClick = { tab = 3 },
-                        icon = { Text("◉", fontSize = 20.sp) },
-                        label = { Text("Estatísticas") },
-                        colors = NavigationBarItemDefaults.colors(selectedIconColor = Azul, selectedTextColor = Azul, indicatorColor = Color(0xFFEAF0FB))
-                    )
+                // Distribui igualmente as quatro abas, com folga nas bordas
+                // e afastamento automático da área de gestos do Android.
+                Surface(color = Color.White, shadowElevation = 8.dp) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        listOf("Painel", "Estados", "Mapa", "Estatísticas").forEachIndexed { index, label ->
+                            BottomTab(
+                                name = label,
+                                index = index,
+                                active = tab == index,
+                                onClick = { tab = index },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
                 }
             }
         ) { padding ->
@@ -285,6 +279,101 @@ private fun ElectionApp() {
                     renameB = { candidateB = it; prefs.edit().putString("candidateB", it).apply() },
                     all = states, calculations = computed
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BottomTab(
+    name: String,
+    index: Int,
+    active: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val tint = if (active) Azul else Secundario
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 2.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Box(
+            modifier = Modifier.width(54.dp).height(32.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(if (active) Color(0xFFEAF0FB) else Color.Transparent),
+            contentAlignment = Alignment.Center
+        ) {
+            BottomTabSymbol(index, tint)
+        }
+        Text(
+            text = name,
+            fontSize = if (name == "Estatísticas") 10.sp else 11.sp,
+            lineHeight = 13.sp,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+            color = tint,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+// Ícones vetoriais desenhados diretamente no Compose: sem biblioteca extra.
+@Composable
+private fun BottomTabSymbol(index: Int, tint: Color) {
+    Canvas(Modifier.size(22.dp)) {
+        val u = size.width / 24f
+        val stroke = 2f * u
+        when (index) {
+            0 -> {
+                // Painel: grade de quatro cartões.
+                for (row in 0..1) for (column in 0..1) {
+                    drawRoundRect(
+                        color = tint,
+                        topLeft = Offset((3 + column * 10).toFloat() * u, (3 + row * 10).toFloat() * u),
+                        size = Size(8f * u, 8f * u),
+                        cornerRadius = CornerRadius(2f * u),
+                        style = Stroke(width = stroke)
+                    )
+                }
+            }
+            1 -> {
+                // Estados: lista organizada.
+                for (row in 0..2) {
+                    val y = (5 + row * 7).toFloat() * u
+                    drawCircle(tint, radius = 1.7f * u, center = Offset(4f * u, y))
+                    drawLine(tint, Offset(9f * u, y), Offset(21f * u, y), strokeWidth = stroke, cap = StrokeCap.Round)
+                }
+            }
+            2 -> {
+                // Mapa: três faixas dobradas.
+                val folds = Path().apply {
+                    moveTo(2f * u, 5f * u); lineTo(9f * u, 2f * u)
+                    lineTo(16f * u, 5f * u); lineTo(22f * u, 2f * u)
+                    lineTo(22f * u, 19f * u); lineTo(15f * u, 22f * u)
+                    lineTo(8f * u, 19f * u); lineTo(2f * u, 22f * u); close()
+                }
+                drawPath(folds, tint, style = Stroke(width = stroke))
+                drawLine(tint, Offset(9f * u, 2f * u), Offset(8f * u, 19f * u), strokeWidth = stroke)
+                drawLine(tint, Offset(16f * u, 5f * u), Offset(15f * u, 22f * u), strokeWidth = stroke)
+            }
+            else -> {
+                // Estatísticas: barras de alturas diferentes.
+                val heights = listOf(8f, 14f, 19f)
+                heights.forEachIndexed { i, h ->
+                    drawRoundRect(
+                        color = tint,
+                        topLeft = Offset((3 + i * 7).toFloat() * u, (22f - h) * u),
+                        size = Size(4f * u, h * u),
+                        cornerRadius = CornerRadius(1.3f * u)
+                    )
+                }
             }
         }
     }
