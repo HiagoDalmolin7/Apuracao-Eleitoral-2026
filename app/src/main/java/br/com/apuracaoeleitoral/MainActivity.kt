@@ -473,32 +473,43 @@ private fun ElectionApp() {
         Scaffold(
             containerColor = Fundo,
             topBar = {
-                TopAppBar(
-                    title = {
-                        Column {
-                            Text("Apuração Eleitoral 2026", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                            Text(
-                                if (manualMode) "Presidência • 2º turno • Manual" else "Presidência • 2º turno • TSE",
-                                fontSize = 12.sp, color = Secundario
-                            )
+                // Android 15/16/17 podem desenhar atrás da barra de status.
+                // Reservamos explicitamente a área segura, inclusive com câmera/notch.
+                // TopAppBar e seletor de modo precisam estar na MESMA coluna
+                // para que o Scaffold considere a altura de ambos.
+                Column(
+                    modifier = Modifier.fillMaxWidth().statusBarsPadding()
+                ) {
+                    TopAppBar(
+                        // A coluna já aplica o espaço da barra de status.
+                        // Desativamos o inset interno para evitar espaço duplicado.
+                        windowInsets = WindowInsets(0, 0, 0, 0),
+                        title = {
+                            Column {
+                                Text("Apuração Eleitoral 2026", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                                Text(
+                                    if (manualMode) "Presidência • 2º turno • Manual" else "Presidência • 2º turno • TSE",
+                                    fontSize = 12.sp, color = Secundario
+                                )
+                            }
+                        },
+                        actions = {
+                            if (!manualMode) {
+                                if (loading) CircularProgressIndicator(
+                                    modifier = Modifier.padding(end = 13.dp).size(18.dp), strokeWidth = 2.dp
+                                ) else TextButton(onClick = { needsRetry++ }) { Text("Atualizar", fontSize = 12.sp) }
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
+                    )
+                    DataModeSwitch(
+                        automatic = !manualMode,
+                        onAutomaticChange = { enabled ->
+                            manualMode = !enabled
+                            prefs.edit().putBoolean("modo_manual", !enabled).apply()
                         }
-                    },
-                    actions = {
-                        if (!manualMode) {
-                            if (loading) CircularProgressIndicator(
-                                modifier = Modifier.padding(end = 13.dp).size(18.dp), strokeWidth = 2.dp
-                            ) else TextButton(onClick = { needsRetry++ }) { Text("Atualizar", fontSize = 12.sp) }
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
-                )
-                DataModeSwitch(
-                    automatic = !manualMode,
-                    onAutomaticChange = { enabled ->
-                        manualMode = !enabled
-                        prefs.edit().putBoolean("modo_manual", !enabled).apply()
-                    }
-                )
+                    )
+                }
             },
             bottomBar = {
                 Surface(color = Color.White, shadowElevation = 8.dp) {
