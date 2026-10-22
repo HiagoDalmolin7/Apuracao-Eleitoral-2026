@@ -4,7 +4,11 @@ plugins {
 
 android {
     namespace = "br.com.apuracaoeleitoral"
-    compileSdk = 37
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 2
+        }
+    }
 
     defaultConfig {
         applicationId = "br.com.apuracaoeleitoral"
