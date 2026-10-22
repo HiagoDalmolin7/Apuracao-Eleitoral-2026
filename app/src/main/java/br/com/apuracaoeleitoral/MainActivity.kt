@@ -1,6 +1,21 @@
 package br.com.apuracaoeleitoral
 
 import android.os.Bundle
+import android.content.SharedPreferences
+import java.net.URL
+import java.net.HttpURLConnection
+import java.text.SimpleDateFormat
+import java.util.Date
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import androidx.lifecycle.Lifecycle
 import android.util.Base64
 import java.io.ByteArrayInputStream
 import java.util.zip.GZIPInputStream
@@ -163,6 +178,157 @@ private fun StateData.asJson(): String = JSONObject()
     .put("eleitores", eleitores).put("abst", abst)
     .put("brancos", brancos).put("nulos", nulos).toString()
 
+
+// === TSE 2026 • Eleição federal 6258 • Presidente, segundo turno ===
+// EA20: https://www.tse.jus.br/eleicoes/informacoes-tecnicas-sobre-a-divulgacao-de-resultados
+// 27 UFs + ZZ (exterior) + BR (consolidado oficial). Os dois últimos NÃO são UFs.
+private val TSE_LOCATIONS = UFS + listOf("ZZ", "BR")
+private const val TSE_BASE = "https://resultados.tse.jus.br/oficial/ele2026/6258/dados"
+private const val TSE_INTERVAL_MS = 60_000L
+
+private data class TseReport(
+    val location: String,
+    val candidate22: Long,
+    val candidate13: Long,
+    val sectionsDone: Long,
+    val sectionsTotal: Long,
+    val electorate: Long,
+    val turnout: Long,
+    val abstentions: Long,
+    val blank: Long,
+    val nullVotes: Long,
+    val generated: String,
+    val generationId: String
+) {
+    val hasVotes get() = sectionsDone > 0L && candidate22 + candidate13 > 0L
+    val sectionsPercent get() = if (sectionsTotal > 0L) sectionsDone * 100.0 / sectionsTotal else 0.0
+    val validVotes get() = candidate22 + candidate13
+}
+
+private fun JSONObject.longField(key: String): Long = optString(key, "0")
+    .replace(".", "").trim().toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+
+// Parser conservador: somente eleição, cargo, abrangência e candidaturas esperados.
+private fun parseTseReport(json: String, region: String): TseReport? = runCatching {
+    val root = JSONObject(json)
+    require(root.optString("ele") == "6258" && root.optString("t") == "2")
+    require(root.optString("cdabr").equals(region, ignoreCase = true))
+    val positions = root.getJSONArray("carg")
+    val president = (0 until positions.length()).map { positions.getJSONObject(it) }
+        .first { it.optString("cd").toIntOrNull() == 1 }
+    var votes22: Long? = null
+    var votes13: Long? = null
+    val blocks = president.getJSONArray("agr")
+    for (i in 0 until blocks.length()) {
+        val group = blocks.getJSONObject(i)
+        val parties = group.optJSONArray("par") ?: continue
+        for (j in 0 until parties.length()) {
+            val candidates = parties.getJSONObject(j).optJSONArray("cand") ?: continue
+            for (k in 0 until candidates.length()) {
+                val candidate = candidates.getJSONObject(k)
+                when (candidate.optString("n")) {
+                    "22" -> votes22 = candidate.longField("vap")
+                    "13" -> votes13 = candidate.longField("vap")
+                }
+            }
+        }
+    }
+    // Não mapear votos por ordem: interromper importação se não achar os dois números.
+    require(votes22 != null && votes13 != null)
+    val sections = root.getJSONObject("s")
+    val voters = root.getJSONObject("e")
+    val ballots = root.getJSONObject("v")
+    val done = sections.longField("st")
+    val total = sections.longField("ts")
+    require(total > 0L && done in 0..total)
+    require(votes22!! + votes13!! <= ballots.longField("tv") || ballots.longField("tv") == 0L)
+    TseReport(
+        location = region,
+        candidate22 = votes22!!,
+        candidate13 = votes13!!,
+        sectionsDone = done,
+        sectionsTotal = total,
+        electorate = voters.longField("te"),
+        turnout = voters.longField("c"),
+        abstentions = voters.longField("a"),
+        blank = ballots.longField("vb"),
+        nullVotes = ballots.longField("vn"),
+        generated = listOf(root.optString("dg"), root.optString("hg"))
+            .filter { it.isNotBlank() }.joinToString(" às "),
+        generationId = root.optString("idg")
+    )
+}.getOrNull()
+
+private fun stateFromOfficial(report: TseReport?): StateData {
+    if (report == null) return StateData("")
+    return StateData(
+        uf = report.location,
+        urnas = String.format(Locale.US, "%.5f", report.sectionsPercent),
+        a = report.candidate22.toString(),
+        b = report.candidate13.toString(),
+        eleitores = report.electorate.toString(),
+        abst = report.abstentions.toString(),
+        brancos = report.blank.toString(),
+        nulos = report.nullVotes.toString()
+    )
+}
+
+private data class DownloadResult(
+    val region: String,
+    val report: TseReport? = null,
+    val json: String? = null,
+    val notModified: Boolean = false,
+    val errorCode: Int = 0,
+    val etag: String? = null,
+    val lastModified: String? = null
+)
+
+private fun officialUrl(region: String): String {
+    val code = region.lowercase(Locale.ROOT)
+    return "$TSE_BASE/$code/$code-c0001-e006258-u.json"
+}
+
+private fun fetchTseRegion(prefs: SharedPreferences, region: String): DownloadResult {
+    var connection: HttpURLConnection? = null
+    try {
+        connection = (URL(officialUrl(region)).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 8_000
+            readTimeout = 8_000
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("User-Agent", "ApuracaoEleitoral2026-Android/2.0")
+            if (prefs.contains("tse_json_$region")) {
+                prefs.getString("tse_etag_$region", null)?.let { setRequestProperty("If-None-Match", it) }
+                prefs.getString("tse_modified_$region", null)?.let { setRequestProperty("If-Modified-Since", it) }
+            }
+        }
+        val code = connection.responseCode
+        if (code == HttpURLConnection.HTTP_NOT_MODIFIED) {
+            return DownloadResult(region, notModified = true)
+        }
+        if (code != HttpURLConnection.HTTP_OK) return DownloadResult(region, errorCode = code)
+        val raw = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        val parsed = parseTseReport(raw, region)
+            ?: return DownloadResult(region, errorCode = -2) // dados inesperados: preservar cache
+        return DownloadResult(
+            region = region,
+            report = parsed,
+            json = raw,
+            etag = connection.getHeaderField("ETag"),
+            lastModified = connection.getHeaderField("Last-Modified")
+        )
+    } catch (_: Exception) {
+        return DownloadResult(region, errorCode = -1)
+    } finally {
+        connection?.disconnect()
+    }
+}
+
+private fun clockTime(whenMs: Long): String = if (whenMs <= 0L) "—"
+    else SimpleDateFormat("dd/MM HH:mm:ss", PtBr).format(Date(whenMs))
+
+private fun nameForRegion(uf: String): String = if (uf == "ZZ") "Exterior (ZZ)" else uf
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -170,44 +336,119 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ElectionApp() {
     val context = androidx.compose.ui.platform.LocalContext.current
-    // Mantém o mesmo arquivo de dados da versão anterior, evitando perder as entradas.
+    val activity = context as ComponentActivity
+    // Cache separado dos dados manuais anteriores: não apagamos o que já estava salvo.
     val prefs = remember { context.getSharedPreferences("apuracao_v2", 0) }
-    var candidateA by remember {
-        mutableStateOf(prefs.getString("candidateA", "Flávio Bolsonaro") ?: "Flávio Bolsonaro")
+    var reports by remember {
+        mutableStateOf(TSE_LOCATIONS.mapNotNull { region ->
+            val raw = prefs.getString("tse_json_$region", null)
+            if (raw != null) parseTseReport(raw, region)?.let { region to it } else null
+        }.toMap())
     }
-    var candidateB by remember {
-        mutableStateOf(prefs.getString("candidateB", "Lula") ?: "Lula")
-    }
-    var states by remember {
-        mutableStateOf(UFS.associateWith { uf -> loadState(prefs.getString("uf_$uf", null), uf) })
-    }
+    var loading by remember { mutableStateOf(false) }
+    var lastCheck by remember { mutableLongStateOf(0L) }
+    var lastGood by remember { mutableLongStateOf(prefs.getLong("tse_last_ok", 0L)) }
+    var unavailable by remember { mutableStateOf(emptySet<String>()) }
+    var needsRetry by remember { mutableIntStateOf(0) }
     var selectedUF by remember { mutableStateOf("SC") }
     var tab by remember { mutableIntStateOf(0) }
 
-    fun update(value: StateData) {
-        states = states.toMutableMap().also { it[value.uf] = value }
-        prefs.edit().putString("uf_${value.uf}", value.asJson()).apply()
+    // Atualiza a cada 60 segundos enquanto o aplicativo está aberto em primeiro plano.
+    // Pausa automaticamente quando a atividade deixa de estar visível.
+    LaunchedEffect(needsRetry) {
+        val limit = Semaphore(3)
+        val retryAfter = mutableMapOf<String, Long>()
+        while (isActive) {
+            if (!activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                delay(1_500L)
+                continue
+            }
+            val due = TSE_LOCATIONS.filter { System.currentTimeMillis() >= (retryAfter[it] ?: 0L) }
+            if (due.isEmpty()) { delay(TSE_INTERVAL_MS); continue }
+            loading = true
+            val answers = withContext(Dispatchers.IO) {
+                coroutineScope {
+                    due.map { region ->
+                        async { limit.withPermit { fetchTseRegion(prefs, region) } }
+                    }.awaitAll()
+                }
+            }
+            var updated = reports
+            val edit = prefs.edit()
+            var successful = 0
+            val failures = mutableSetOf<String>()
+            var throttled = false
+            for (answer in answers) {
+                when {
+                    answer.report != null && answer.json != null -> {
+                        // Somente arquivos oficialmente válidos sobrescrevem o último registro.
+                        updated = updated + (answer.region to answer.report)
+                        edit.putString("tse_json_${answer.region}", answer.json)
+                        if (answer.etag != null) edit.putString("tse_etag_${answer.region}", answer.etag)
+                        if (answer.lastModified != null) edit.putString("tse_modified_${answer.region}", answer.lastModified)
+                        successful++
+                        retryAfter.remove(answer.region)
+                    }
+                    answer.notModified && updated.containsKey(answer.region) -> {
+                        successful++
+                        retryAfter.remove(answer.region)
+                    }
+                    else -> {
+                        failures.add(answer.region)
+                        if (answer.errorCode == 403 || answer.errorCode == 429) {
+                            throttled = true
+                            retryAfter[answer.region] = System.currentTimeMillis() + 300_000L
+                        } else if (answer.errorCode == 404) {
+                            // Não repetir 404 a cada minuto antes da publicação do TSE.
+                            retryAfter[answer.region] = System.currentTimeMillis() + 240_000L
+                        }
+                    }
+                }
+            }
+            lastCheck = System.currentTimeMillis()
+            if (successful > 0) {
+                lastGood = lastCheck
+                edit.putLong("tse_last_ok", lastGood)
+            }
+            edit.apply()
+            reports = updated
+            unavailable = failures + retryAfter.keys.filter { System.currentTimeMillis() < (retryAfter[it] ?: 0L) }
+            loading = false
+            // Bloqueio temporário 403/429: recuar em vez de sobrecarregar o servidor.
+            delay(if (throttled) 300_000L else TSE_INTERVAL_MS)
+        }
     }
 
-    val computed = remember(states) { states.mapValues { estimate(it.value) } }
-    val recorded = computed.filterValues { it.valid }
-    val estimateA = recorded.values.sumOf { it.a }
-    val estimateB = recorded.values.sumOf { it.b }
-    val total = estimateA + estimateB
-    val shareA = if (total > 0) estimateA / total else 0.0
-    val shareB = if (total > 0) estimateB / total else 0.0
-    val warnings = recorded.values.count { it.warning.isNotBlank() }
+    val all = remember(reports) {
+        (UFS + "ZZ").associateWith { region ->
+            stateFromOfficial(reports[region]).let { if (it.uf.isBlank()) it.copy(uf = region) else it }
+        }
+    }
+    val projections = remember(all) { all.mapValues { estimate(it.value) } }
+    val projected = projections.values.filter { it.valid }
+    val projectedA = projected.sumOf { it.a }
+    val projectedB = projected.sumOf { it.b }
+    val mainReport = reports["BR"]
+    val exterior = reports["ZZ"]
+    val status = when {
+        loading && lastCheck == 0L -> "Conectando ao TSE..."
+        lastGood == 0L -> "Aguardando dados oficiais do TSE"
+        unavailable.isNotEmpty() -> "Última consulta: ${clockTime(lastCheck)} • ${unavailable.size} fonte(s) indisponível(is)"
+        else -> "Sincronizado: ${clockTime(lastGood)} • a cada 60 s"
+    }
+    val labelsA = "Flávio Bolsonaro"
+    val labelsB = "Lula"
 
     MaterialTheme(
         colorScheme = lightColorScheme(
             primary = Azul, background = Fundo, surface = Color.White,
             onSurface = Tinta, onBackground = Tinta
-        ),
-        typography = Typography()
+        ), typography = Typography()
     ) {
         Scaffold(
             containerColor = Fundo,
@@ -216,68 +457,64 @@ private fun ElectionApp() {
                     title = {
                         Column {
                             Text("Apuração Eleitoral 2026", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                            Text("Presidência  •  2º turno", fontSize = 12.sp, color = Secundario)
+                            Text("Presidência • 2º turno • TSE", fontSize = 12.sp, color = Secundario)
                         }
+                    },
+                    actions = {
+                        if (loading) CircularProgressIndicator(
+                            modifier = Modifier.padding(end = 13.dp).size(18.dp), strokeWidth = 2.dp
+                        ) else TextButton(onClick = { needsRetry++ }) { Text("Atualizar", fontSize = 12.sp) }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
                 )
             },
             bottomBar = {
-                // Distribui igualmente as quatro abas, com folga nas bordas
-                // e afastamento automático da área de gestos do Android.
                 Surface(color = Color.White, shadowElevation = 8.dp) {
                     Row(
-                        modifier = Modifier.fillMaxWidth()
-                            .navigationBarsPadding()
+                        modifier = Modifier.fillMaxWidth().navigationBarsPadding()
                             .padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         listOf("Painel", "Estados", "Mapa", "Estatísticas").forEachIndexed { index, label ->
-                            BottomTab(
-                                name = label,
-                                index = index,
-                                active = tab == index,
-                                onClick = { tab = index },
-                                modifier = Modifier.weight(1f)
-                            )
+                            BottomTab(label, index, tab == index, { tab = index }, Modifier.weight(1f))
                         }
                     }
                 }
             }
         ) { padding ->
             when (tab) {
-                0 -> Dashboard(
+                0 -> OfficialDashboard(
                     modifier = Modifier.padding(padding),
-                    candidateA = candidateA, candidateB = candidateB,
-                    estimateA = estimateA, estimateB = estimateB,
-                    states = computed, warnings = warnings,
-                    onChooseState = { uf -> selectedUF = uf; tab = 1 },
+                    candidateA = labelsA, candidateB = labelsB,
+                    national = mainReport, exterior = exterior,
+                    projectedA = projectedA, projectedB = projectedB,
+                    stateEstimates = projections, status = status,
+                    failed = unavailable,
+                    onChoose = { selectedUF = it; tab = 1 },
                     onStates = { tab = 1 }
                 )
-                1 -> StatesPage(
+                1 -> OfficialRegions(
                     modifier = Modifier.padding(padding),
-                    candidateA = candidateA, candidateB = candidateB,
-                    selected = selectedUF,
-                    select = { selectedUF = it },
-                    data = states.getValue(selectedUF),
-                    result = computed.getValue(selectedUF),
-                    update = ::update,
-                    all = computed
+                    candidateA = labelsA, candidateB = labelsB,
+                    selected = selectedUF, onSelect = { selectedUF = it },
+                    report = reports[selectedUF], estimate = projections.getValue(selectedUF),
+                    all = reports, failures = unavailable, status = status
                 )
                 2 -> MapPage(
                     modifier = Modifier.padding(padding),
-                    candidateA = candidateA, candidateB = candidateB,
-                    computed = computed,
-                    editState = { uf -> selectedUF = uf; tab = 1 }
+                    candidateA = labelsA, candidateB = labelsB,
+                    computed = projections.filterKeys { it in UFS },
+                    editState = { selectedUF = it; tab = 1 }
                 )
-                else -> StatisticsPage(
+                else -> OfficialStatistics(
                     modifier = Modifier.padding(padding),
-                    candidateA = candidateA,
-                    candidateB = candidateB,
-                    renameA = { candidateA = it; prefs.edit().putString("candidateA", it).apply() },
-                    renameB = { candidateB = it; prefs.edit().putString("candidateB", it).apply() },
-                    all = states, calculations = computed
+                    national = mainReport,
+                    exterior = exterior,
+                    sources = reports,
+                    projected = projections,
+                    status = status,
+                    failed = unavailable
                 )
             }
         }
@@ -441,75 +678,91 @@ private fun RatioBar(a: Double, b: Double, modifier: Modifier = Modifier, thickn
     }
 }
 
+
 @Composable
-private fun Dashboard(
+private fun OfficialDashboard(
     modifier: Modifier,
     candidateA: String, candidateB: String,
-    estimateA: Double, estimateB: Double,
-    states: Map<String, Estimate>, warnings: Int,
-    onChooseState: (String) -> Unit, onStates: () -> Unit
+    national: TseReport?, exterior: TseReport?,
+    projectedA: Double, projectedB: Double,
+    stateEstimates: Map<String, Estimate>, status: String,
+    failed: Set<String>, onChoose: (String) -> Unit, onStates: () -> Unit
 ) {
-    val sample = states.values.filter { it.valid }
-    val total = estimateA + estimateB
-    val shareA = if (total > 0) estimateA / total else 0.0
-    val shareB = if (total > 0) estimateB / total else 0.0
-    val actualA = sample.sumOf { it.observedA }
-    val actualB = sample.sumOf { it.observedB }
-    val remaining = max(0.0, total - actualA - actualB)
-
+    val validOfficial = national?.takeIf { it.hasVotes }
+    val validProjection = stateEstimates.values.count { it.valid }
+    val allProjected = projectedA + projectedB
+    val projectedLabel = if (validProjection == 28) "Brasil + exterior" else "$validProjection de 28 regiões"
     ContentColumn(modifier) {
-        Note("PROJEÇÃO NÃO OFICIAL • Estimativas calculadas com os dados inseridos manualmente. As urnas restantes podem ter distribuição de votos diferente.")
+        Note("DADOS OFICIAIS TSE • Os votos apurados são do TSE. As projeções são cálculos independentes, sujeitos a mudanças conforme chegam novas urnas.")
+        Text(status, color = Secundario, fontSize = 12.sp)
         SurfaceCard {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                Column {
-                    Text("Projeção nacional", fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                    Text("Somente UFs com dados suficientes", fontSize = 12.sp, color = Secundario)
+            Text("Resultado oficial apurado", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+            if (validOfficial == null) {
+                Text("Aguardando divulgação de votos do segundo turno pelo TSE.", color = Secundario)
+                Text("Dados ainda não publicados não são contabilizados como zero.", fontSize = 12.sp, color = Secundario)
+            } else {
+                Text("${percentage(validOfficial.sectionsPercent)} das seções totalizadas", fontWeight = FontWeight.SemiBold)
+                LinearProgressIndicator(
+                    progress = { (validOfficial.sectionsPercent / 100).toFloat().coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(99.dp)),
+                    color = Azul, trackColor = Color(0xFFE8EDF4)
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    CandidateInfo(candidateA, validOfficial.candidate22.toDouble(),
+                        validOfficial.candidate22.toDouble() / validOfficial.validVotes, Verde, Modifier.weight(1f))
+                    CandidateInfo(candidateB, validOfficial.candidate13.toDouble(),
+                        validOfficial.candidate13.toDouble() / validOfficial.validVotes, Vermelho, Modifier.weight(1f))
                 }
-                Surface(shape = RoundedCornerShape(30.dp), color = Color(0xFFF0F3F7)) {
-                    Text("${sample.size}/27 UFs", Modifier.padding(horizontal = 10.dp, vertical = 7.dp), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                }
+                RatioBar(validOfficial.candidate22.toDouble(), validOfficial.candidate13.toDouble(), thickness = 14)
+                SummaryLine("Votos válidos contabilizados", count(validOfficial.validVotes.toDouble()))
+                SummaryLine("Brancos / nulos", "${count(validOfficial.blank.toDouble())} / ${count(validOfficial.nullVotes.toDouble())}")
+                Text("Arquivo TSE: ${validOfficial.generated}", fontSize = 11.sp, color = Secundario)
             }
-            Spacer(Modifier.height(3.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                CandidateInfo(candidateA, estimateA, shareA, Verde, Modifier.weight(1f))
-                CandidateInfo(candidateB, estimateB, shareB, Vermelho, Modifier.weight(1f))
-            }
-            RatioBar(estimateA, estimateB, thickness = 14)
-            HorizontalDivider(color = Borda)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column {
-                    Text("Diferença projetada", fontSize = 12.sp, color = Secundario)
-                    Text("${count(abs(estimateA - estimateB))} votos", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                }
-                Text("ESTIMATIVA", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Secundario)
-            }
-            if (sample.size < 27) Text("A projeção não contempla ${27 - sample.size} UF(s). Ainda não é uma estimativa nacional completa.", color = Aviso, fontSize = 12.sp, lineHeight = 17.sp)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            MiniStat("Apurados", count(actualA + actualB), Modifier.weight(1f))
-            MiniStat("Restantes*", count(remaining), Modifier.weight(1f))
+        SurfaceCard {
+            Text("Projeção proporcional", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+            Text("Abrangência: $projectedLabel", color = Secundario, fontSize = 12.sp)
+            if (allProjected <= 0.0) {
+                Text("Sem votos suficientes para estimar o restante.", color = Secundario)
+            } else {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    CandidateInfo(candidateA, projectedA, projectedA / allProjected, Verde, Modifier.weight(1f))
+                    CandidateInfo(candidateB, projectedB, projectedB / allProjected, Vermelho, Modifier.weight(1f))
+                }
+                RatioBar(projectedA, projectedB, thickness = 14)
+                SummaryLine("Diferença estimada", "${count(abs(projectedA-projectedB))} votos")
+                if (validProjection < 28) Text(
+                    "A projeção ainda não inclui ${28 - validProjection} região(ões). Não representa uma estimativa nacional completa.",
+                    fontSize = 12.sp, color = Aviso
+                )
+            }
+            Text("Método: votos do candidato na região ÷ fração de seções totalizadas na mesma região. A participação de cada urna pode variar.",
+                fontSize = 12.sp, color = Secundario)
+        }
+        SurfaceCard {
+            Text("Exterior (ZZ)", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            if (exterior?.hasVotes == true) {
+                SummaryLine("Seções totalizadas", percentage(exterior.sectionsPercent))
+                SummaryLine(candidateA, count(exterior.candidate22.toDouble()))
+                SummaryLine(candidateB, count(exterior.candidate13.toDouble()))
+                SummaryLine("Votos válidos", count(exterior.validVotes.toDouble()))
+            } else {
+                Text("Aguardando votos oficiais do exterior.", fontSize = 13.sp, color = Secundario)
+            }
+            TextButton(onClick = { onChoose("ZZ") }) { Text("Detalhes do exterior") }
         }
         SurfaceCard {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Apuração por estado", fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                TextButton(onClick = onStates) { Text("Ver todos") }
+                TextButton(onClick = onStates) { Text("Ver 27 UFs") }
             }
-            val populated = UFS.mapNotNull { uf ->
-                val s = states.getValue(uf)
-                if (s.valid) uf to s else null
-            }
-            if (populated.isEmpty()) {
-                Text("Nenhum estado preenchido. Abra Estados para começar a apuração.", color = Secundario, fontSize = 13.sp)
-                Button(onClick = onStates, modifier = Modifier.fillMaxWidth()) { Text("Preencher um estado") }
-            } else {
-                populated.take(6).forEach { (uf, data) ->
-                    StateSummaryRow(uf, data, onClick = { onChooseState(uf) })
-                }
-                if (populated.size > 6) Text("Mais ${populated.size - 6} estado(s) disponíveis na aba Estados", fontSize = 12.sp, color = Secundario)
+            val available = UFS.filter { stateEstimates.getValue(it).valid }
+            if (available.isEmpty()) Text("Aguardando dados estaduais do TSE.", color = Secundario)
+            else available.take(6).forEach { uf ->
+                StateSummaryRow(uf, stateEstimates.getValue(uf)) { onChoose(uf) }
             }
         }
-        if (warnings > 0) Note("$warnings UF(s) com alertas de plausibilidade. Confira os dados na aba Estados.")
-        Text("*Votos restantes estimados nas UFs com dados. As porcentagens representam projeções matemáticas, não resultados oficiais.", color = Secundario, fontSize = 11.sp, lineHeight = 16.sp)
+        if (failed.isNotEmpty()) Note("Algumas consultas não foram concluídas. Últimos dados válidos permanecem salvos; consulte o horário do arquivo TSE para avaliar a atualidade.")
     }
 }
 
@@ -558,127 +811,146 @@ private fun NumberField(title: String, value: String, onChange: (String) -> Unit
     }
 }
 
+
 @Composable
-private fun StatesPage(
+private fun OfficialRegions(
     modifier: Modifier,
     candidateA: String, candidateB: String,
-    selected: String, select: (String) -> Unit,
-    data: StateData, result: Estimate,
-    update: (StateData) -> Unit,
-    all: Map<String, Estimate>
+    selected: String, onSelect: (String) -> Unit,
+    report: TseReport?, estimate: Estimate,
+    all: Map<String, TseReport>, failures: Set<String>, status: String
 ) {
     var expanded by remember { mutableStateOf(false) }
     ContentColumn(modifier) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("Apuração por estado", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text("Escolha uma UF e informe os números acumulados.", fontSize = 13.sp, color = Secundario)
-        }
+        Text("Apuração por região", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text("Dados importados automaticamente do TSE • 27 UFs e exterior", color = Secundario, fontSize = 12.sp)
+        Text(status, color = Secundario, fontSize = 12.sp)
         SurfaceCard {
-            Text("Estado selecionado", fontWeight = FontWeight.Medium, fontSize = 13.sp, color = Secundario)
+            Text("Escolher região", fontWeight = FontWeight.Medium)
             Box {
-                OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
-                    Text(selected, modifier = Modifier.weight(1f), textAlign = TextAlign.Start, fontWeight = FontWeight.Bold)
-                    Text("⌄", fontSize = 20.sp)
+                OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text(nameForRegion(selected), modifier = Modifier.weight(1f), textAlign = TextAlign.Start)
+                    Text("⌄")
                 }
                 DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    UFS.forEach { uf ->
-                        DropdownMenuItem(
-                            text = { Text("$uf${if (all.getValue(uf).valid) "  •  preenchido" else ""}") },
-                            onClick = { select(uf); expanded = false }
-                        )
+                    (UFS + "ZZ").forEach { region ->
+                        DropdownMenuItem(text = { Text(nameForRegion(region) +
+                            if (all[region]?.hasVotes == true) " • atualizado" else "") },
+                            onClick = { onSelect(region); expanded = false })
                     }
                 }
             }
-            Text("Urnas apuradas", fontSize = 12.sp, color = Secundario)
-            Text(percentage(result.urnas), fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Tinta)
-            LinearProgressIndicator(
-                progress = { (result.urnas / 100).toFloat().coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(10.dp)),
-                color = Azul, trackColor = Color(0xFFE8EDF4)
-            )
-            NumberField("Porcentagem de urnas apuradas (%)", data.urnas, { update(data.copy(urnas = it)) }, decimal = true)
+            if (selected == "ZZ") Text("Total do exterior: abrangência ZZ do TSE. Não há mapa por país.", fontSize = 12.sp, color = Secundario)
         }
         SurfaceCard {
-            Text("Votos dos candidatos", fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            Text("Informe os votos acumulados nas urnas já apuradas.", fontSize = 12.sp, color = Secundario)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                Box(Modifier.size(10.dp).background(Verde, CircleShape))
-                Text(candidateA, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text(nameForRegion(selected), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            if (report == null) {
+                Text("Arquivo da região ainda não disponível. A consulta será repetida automaticamente.", color = Secundario)
+            } else {
+                Text("${percentage(report.sectionsPercent)} das seções totalizadas", fontWeight = FontWeight.SemiBold)
+                LinearProgressIndicator(
+                    progress = { (report.sectionsPercent / 100).toFloat().coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(99.dp)),
+                    color = Azul, trackColor = Color(0xFFE8EDF4)
+                )
+                if (report.hasVotes) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        CandidateInfo(candidateA, report.candidate22.toDouble(), report.candidate22.toDouble() / report.validVotes, Verde, Modifier.weight(1f))
+                        CandidateInfo(candidateB, report.candidate13.toDouble(), report.candidate13.toDouble() / report.validVotes, Vermelho, Modifier.weight(1f))
+                    }
+                    RatioBar(report.candidate22.toDouble(), report.candidate13.toDouble(), thickness = 13)
+                } else Text("Sem votos divulgados até o momento.", color = Secundario)
+                SummaryLine("Seções contabilizadas", "${count(report.sectionsDone.toDouble())} / ${count(report.sectionsTotal.toDouble())}")
+                SummaryLine("Eleitorado", count(report.electorate.toDouble()))
+                SummaryLine("Comparecimento observado", count(report.turnout.toDouble()))
+                SummaryLine("Abstenções observadas", count(report.abstentions.toDouble()))
+                SummaryLine("Brancos e nulos", "${count(report.blank.toDouble())} / ${count(report.nullVotes.toDouble())}")
+                Text("Dados TSE gerados em ${report.generated}", fontSize = 11.sp, color = Secundario)
             }
-            NumberField("Votos informados", data.a, { update(data.copy(a = it)) })
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                Box(Modifier.size(10.dp).background(Vermelho, CircleShape))
-                Text(candidateB, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-            }
-            NumberField("Votos informados", data.b, { update(data.copy(b = it)) })
+            if (selected in failures) Note("Não foi possível atualizar esta região agora. Se houver números acima, eles são do último arquivo salvo.")
         }
         SurfaceCard {
-            Text("Eleitorado e outros votos", fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            Text("Informe valores observados, não projeções. Deixe em branco quando não souber.", fontSize = 12.sp, color = Secundario)
-            NumberField("Eleitores totais da UF", data.eleitores, { update(data.copy(eleitores = it)) })
-            NumberField("Abstenções observadas", data.abst, { update(data.copy(abst = it)) })
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                NumberField("Brancos", data.brancos, { update(data.copy(brancos = it)) }, modifier = Modifier.weight(1f))
-                NumberField("Nulos", data.nulos, { update(data.copy(nulos = it)) }, modifier = Modifier.weight(1f))
-            }
+            Text("Projeção de ${nameForRegion(selected)}", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            if (estimate.valid) {
+                SummaryLine(candidateA, count(estimate.a))
+                SummaryLine(candidateB, count(estimate.b))
+                RatioBar(estimate.a, estimate.b)
+                SummaryLine("Votos válidos projetados", count(estimate.validos))
+                if (estimate.warning.isNotBlank()) Note(estimate.warning)
+            } else Text("Projeção indisponível até a divulgação dos primeiros votos.", color = Secundario)
+            Text("Projeção calculada, não divulgada pelo TSE.", fontSize = 12.sp, color = Secundario)
         }
         SurfaceCard {
-            Text("Projeção para $selected", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                CandidateInfo(candidateA, result.a, if (result.validos > 0) result.a / result.validos else 0.0, Verde, Modifier.weight(1f))
-                CandidateInfo(candidateB, result.b, if (result.validos > 0) result.b / result.validos else 0.0, Vermelho, Modifier.weight(1f))
-            }
-            RatioBar(result.a, result.b)
-            HorizontalDivider(color = Borda)
-            Text("Brancos: ${count(result.brancos)}  •  Nulos: ${count(result.nulos)}", fontSize = 12.sp)
-            Text("Abstenções: ${count(result.abst)}", fontSize = 12.sp)
-            if (result.warning.isNotBlank()) Note(result.warning)
-            OutlinedButton(onClick = { update(StateData(selected)) }, modifier = Modifier.fillMaxWidth()) {
-                Text("Limpar os dados de $selected")
+            Text("Resumo das regiões", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            (UFS + "ZZ").forEach { region ->
+                val item = all[region]
+                Column(Modifier.fillMaxWidth().clickable { onSelect(region) }.padding(vertical = 5.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(nameForRegion(region), fontWeight = FontWeight.Medium)
+                        Text(if (item?.hasVotes == true) percentage(item.sectionsPercent) else "—", fontSize = 12.sp, color = Secundario)
+                    }
+                    if (item?.hasVotes == true) RatioBar(item.candidate22.toDouble(), item.candidate13.toDouble(), thickness = 7)
+                }
+                HorizontalDivider(color = Borda)
             }
         }
-        Note("Os dados são salvos automaticamente neste aparelho. O percentual de urnas é usado como aproximação do percentual de votos apurados.")
     }
 }
 
 @Composable
-private fun StatisticsPage(
+private fun OfficialStatistics(
     modifier: Modifier,
-    candidateA: String, candidateB: String,
-    renameA: (String) -> Unit, renameB: (String) -> Unit,
-    all: Map<String, StateData>, calculations: Map<String, Estimate>
+    national: TseReport?, exterior: TseReport?,
+    sources: Map<String, TseReport>,
+    projected: Map<String, Estimate>,
+    status: String,
+    failed: Set<String>
 ) {
-    val rows = calculations.values.filter { it.valid }
-    val electorate = all.values.sumOf { quantity(it.eleitores) }
-    val projectedAbst = rows.sumOf { it.abst }
-    val projectedBlank = rows.sumOf { it.brancos }
-    val projectedNull = rows.sumOf { it.nulos }
-    val projectedVotes = rows.sumOf { it.validos }
-    val turnouts = projectedVotes + projectedBlank + projectedNull
-    val registered = all.values.count { quantity(it.eleitores) > 0 }
+    val regionsWithVotes = (UFS + "ZZ").count { sources[it]?.hasVotes == true }
+    val projectedRows = projected.values.filter { it.valid }
+    val base = national?.takeIf { it.hasVotes }
     ContentColumn(modifier) {
         Text("Estatísticas", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(status, fontSize = 12.sp, color = Secundario)
         SurfaceCard {
-            Text("Eleitorado e comparecimento", fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            SummaryLine("Eleitores cadastrados", count(electorate))
-            SummaryLine("UFs com eleitorado informado", "$registered de 27")
-            SummaryLine("Comparecimento projetado*", count(turnouts))
-            SummaryLine("Abstenções projetadas*", count(projectedAbst))
+            Text("Brasil • números oficiais", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            if (base != null) {
+                SummaryLine("Eleitorado nacional", count(base.electorate.toDouble()))
+                SummaryLine("Seções totalizadas", "${count(base.sectionsDone.toDouble())} / ${count(base.sectionsTotal.toDouble())}")
+                SummaryLine("Apuração", percentage(base.sectionsPercent))
+                SummaryLine("Comparecimento", count(base.turnout.toDouble()))
+                SummaryLine("Abstenções", count(base.abstentions.toDouble()))
+                SummaryLine("Votos válidos dos candidatos", count(base.validVotes.toDouble()))
+                SummaryLine("Brancos", count(base.blank.toDouble()))
+                SummaryLine("Nulos", count(base.nullVotes.toDouble()))
+                Text("TSE: ${base.generated}", fontSize = 11.sp, color = Secundario)
+            } else Text("Aguardando os primeiros votos nacionais divulgados pelo TSE.", color = Secundario)
         }
         SurfaceCard {
-            Text("Distribuição dos votos", fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            SummaryLine("Votos válidos projetados*", count(projectedVotes))
-            SummaryLine("Votos brancos projetados*", count(projectedBlank))
-            SummaryLine("Votos nulos projetados*", count(projectedNull))
-            Text("*Somente UFs com dados válidos. Categorias não preenchidas não são estimadas automaticamente.", fontSize = 12.sp, color = Secundario)
+            Text("Exterior • resultado oficial", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            if (exterior?.hasVotes == true) {
+                SummaryLine("Seções totalizadas", percentage(exterior.sectionsPercent))
+                SummaryLine("Eleitorado", count(exterior.electorate.toDouble()))
+                SummaryLine("Flávio Bolsonaro", count(exterior.candidate22.toDouble()))
+                SummaryLine("Lula", count(exterior.candidate13.toDouble()))
+                SummaryLine("Votos válidos", count(exterior.validVotes.toDouble()))
+                SummaryLine("Brancos", count(exterior.blank.toDouble()))
+                SummaryLine("Nulos", count(exterior.nullVotes.toDouble()))
+                SummaryLine("Abstenções", count(exterior.abstentions.toDouble()))
+            } else Text("Ainda sem votos publicados no exterior.", color = Secundario)
+            Text("Agregado oficial ZZ, sem mapa de países.", fontSize = 12.sp, color = Secundario)
         }
         SurfaceCard {
-            Text("Nomes dos candidatos", fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            OutlinedTextField(candidateA, renameA, label = { Text("Candidato verde") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(candidateB, renameB, label = { Text("Candidato vermelho") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            Text("A mudança de nome não altera votos já registrados.", fontSize = 12.sp, color = Secundario)
+            Text("Projeções matemáticas", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            SummaryLine("Regiões com dados", "$regionsWithVotes / 28")
+            SummaryLine("Votos válidos projetados", count(projectedRows.sumOf { it.validos }))
+            SummaryLine("Brancos projetados", count(projectedRows.sumOf { it.brancos }))
+            SummaryLine("Nulos projetados", count(projectedRows.sumOf { it.nulos }))
+            SummaryLine("Abstenções projetadas", count(projectedRows.sumOf { it.abst }))
+            Text("Somente regiões com votos apurados. Resultados não são oficiais e não incluem municípios sem amostra.", fontSize = 12.sp, color = Secundario)
         }
-        Note("Todas as projeções são cálculos proporcionais das urnas informadas. Não há conexão com o TSE, nem previsão estatística do resultado final.")
+        Note("Este aplicativo é independente e não representa o TSE. Os totais oficiais são publicados pelo Tribunal; os números projetados são cálculos proporcionais do aplicativo.")
+        if (failed.isNotEmpty()) Text("Sem atualização recente: ${failed.sorted().joinToString()}", color = Aviso, fontSize = 12.sp)
     }
 }
 
@@ -816,7 +1088,7 @@ private fun MapPage(
     ContentColumn(modifier) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Mapa da apuração", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text("Toque em um estado para ver sua projeção.", fontSize = 13.sp, color = Secundario)
+            Text("Toque em uma UF para consultar votos oficiais e projeção.", fontSize = 13.sp, color = Secundario)
         }
         SurfaceCard {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -824,7 +1096,7 @@ private fun MapPage(
                 Text("$reported/27 UFs", fontSize = 12.sp, color = Secundario)
             }
             BrazilStateMap(geometry, computed, picked, onSelected = { picked = it })
-            Text("Cores proporcionais aos votos válidos informados em cada UF.", fontSize = 12.sp, color = Secundario)
+            Text("Cores calculadas a partir dos votos oficiais apurados em cada UF.", fontSize = 12.sp, color = Secundario)
             Box(
                 Modifier.fillMaxWidth().height(13.dp).clip(RoundedCornerShape(99.dp))
                     .background(Brush.horizontalGradient(listOf(Vermelho, lerp(Vermelho, Verde, .5f), Verde)))
@@ -836,7 +1108,7 @@ private fun MapPage(
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Box(Modifier.size(11.dp).background(Color(0xFFE2E7ED), RoundedCornerShape(3.dp)))
-                Text("Cinza = estado sem dados suficientes", fontSize = 12.sp, color = Secundario)
+                Text("Cinza = sem votos oficiais disponíveis", fontSize = 12.sp, color = Secundario)
             }
         }
         SurfaceCard {
@@ -869,16 +1141,16 @@ private fun MapPage(
                 RatioBar(current.a, current.b, thickness = 12)
                 HorizontalDivider(color = Borda)
                 SummaryLine("Votos válidos projetados", count(current.validos))
-                SummaryLine("Votos observados", count(current.observedA + current.observedB))
+                SummaryLine("Votos apurados pelo TSE", count(current.observedA + current.observedB))
                 if (current.warning.isNotBlank()) Note(current.warning)
             } else {
-                Text("Sem votos suficientes para projetar esta UF. Informe o percentual de urnas e os votos dos candidatos.", color = Secundario, fontSize = 13.sp)
+                Text("Aguardando votos oficiais e seções totalizadas para projetar esta UF.", color = Secundario, fontSize = 13.sp)
             }
             Button(onClick = { editState(picked) }, modifier = Modifier.fillMaxWidth()) {
-                Text("${if (current.valid) "Atualizar" else "Preencher"} dados de $picked")
+                Text("Ver dados oficiais de $picked")
             }
         }
-        Note("MAPA NÃO OFICIAL • A mistura de cores mostra apenas a proporção dos votos válidos de cada UF. Não representa o percentual de urnas apuradas e não prevê mudanças nas urnas restantes.")
+        Note("MAPA INDEPENDENTE • As cores refletem a proporção dos votos oficialmente apurados em cada UF, não o avanço das seções. A projeção é calculada separadamente.")
         Text("Geometria simplificada dos estados (TopoJSON, licença MIT), disponível no app sem internet.", color = Secundario, fontSize = 11.sp)
     }
 }
