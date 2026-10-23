@@ -44,6 +44,7 @@ import androidx.activity.compose.setContent
 import androidx.core.view.WindowCompat
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.AnimatedContent
@@ -55,11 +56,11 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
@@ -1024,21 +1025,59 @@ private fun ElectionApp() {
     val optionsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val sheetScope = rememberCoroutineScope()
     var sheetHeightPx by remember { mutableFloatStateOf(0f) }
-    val screenHeightPx = with(density) { LocalConfiguration.current.screenHeightDp.dp.toPx() }
-    val sheetReveal by remember(showOptions, optionsSheetState, sheetHeightPx, screenHeightPx) {
+    // Usa a altura realmente medida da janela, sem estimar o tamanho do modal.
+    // A posição permanece estável mesmo durante gestos rápidos e mudanças de layout.
+    var windowHeightPx by remember { mutableFloatStateOf(0f) }
+    var sheetDragPx by remember { mutableFloatStateOf(0f) }
+    var closingOptions by remember { mutableStateOf(false) }
+    val sheetReveal by remember(showOptions, optionsSheetState) {
         derivedStateOf {
-            if (!showOptions || sheetHeightPx <= 1f) 0f
+            if (!showOptions || sheetHeightPx <= 1f || windowHeightPx <= 1f) 0f
             else {
-                val y = runCatching { optionsSheetState.requireOffset() }.getOrNull()
-                if (y == null || !y.isFinite()) 0f
-                else ((screenHeightPx - y) / sheetHeightPx).coerceIn(0f, 1f)
+                val nativeY = runCatching { optionsSheetState.requireOffset() }.getOrNull()
+                if (nativeY == null || !nativeY.isFinite()) 0f
+                else ((windowHeightPx - nativeY - sheetDragPx) / sheetHeightPx)
+                    .coerceIn(0f, 1f)
             }
         }
     }
+    // A cor e o desfoque seguem a posição do pop-up, mas a interpolação evita
+    // mudanças abruptas quando o modal termina de sair da composição.
+    val visibleOverlay by animateFloatAsState(
+        targetValue = sheetReveal,
+        animationSpec = tween(durationMillis = 130),
+        label = "Fundo do menu"
+    )
     fun dismissOptions() {
+        if (closingOptions || !showOptions) return
+        closingOptions = true
         sheetScope.launch {
-            if (optionsSheetState.isVisible) optionsSheetState.hide()
-            showOptions = false
+            try {
+                // Um único controlador de fechamento; não disputar com a rolagem interna.
+                if (optionsSheetState.isVisible) optionsSheetState.hide()
+            } finally {
+                showOptions = false
+                sheetDragPx = 0f
+                closingOptions = false
+            }
+        }
+    }
+    fun finishSheetDrag() {
+        if (sheetDragPx > with(density) { 68.dp.toPx() }) {
+            dismissOptions()
+        } else {
+            sheetScope.launch {
+                animate(sheetDragPx, 0f, animationSpec = tween(180)) { value, _ ->
+                    sheetDragPx = value
+                }
+            }
+        }
+    }
+    fun cancelSheetDrag() {
+        sheetScope.launch {
+            animate(sheetDragPx, 0f, animationSpec = tween(180)) { value, _ ->
+                sheetDragPx = value
+            }
         }
     }
     // O modo manual utiliza as mesmas chaves da versão original (uf_SC, uf_GO...).
@@ -1046,6 +1085,20 @@ private fun ElectionApp() {
     var manualMode by remember { mutableStateOf(prefs.getBoolean("modo_manual", false)) }
     var notificationOn by remember { mutableStateOf(prefs.getBoolean("notificacao_projecao_ativa", false)) }
     var notificationError by remember { mutableStateOf(false) }
+    // A ação "Encerrar" é disparada pelo serviço fora da tela Compose.
+    // Escutar a mesma preferência sincroniza imediatamente o Switch, mesmo com
+    // o menu aberto e sem exigir que o app seja colocado em segundo plano.
+    DisposableEffect(prefs, activity) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { changed, key ->
+            if (key == "notificacao_projecao_ativa") {
+                activity.runOnUiThread {
+                    notificationOn = changed.getBoolean("notificacao_projecao_ativa", false)
+                }
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
     val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             prefs.edit().putBoolean("notificacao_projecao_ativa", true).apply()
@@ -1327,6 +1380,14 @@ private fun ElectionApp() {
             ElectionOptionsSheet(
                 sheetState = optionsSheetState,
                 onSheetHeight = { sheetHeightPx = it },
+                dragOffsetPx = sheetDragPx,
+                onDragBy = { delta ->
+                    // Aceitar apenas o gesto para baixo na alça; gestos para cima
+                    // continuam rolando o conteúdo sem puxar a folha modal.
+                    sheetDragPx = (sheetDragPx + delta).coerceIn(0f, sheetHeightPx * 0.85f)
+                },
+                onDragFinished = { finishSheetDrag() },
+                onDragCancelled = { cancelSheetDrag() },
                 electionMode = electionMode,
                 selectedGovernor = selectedGovernorUF,
                 automatic = !manualMode,
@@ -1366,18 +1427,19 @@ private fun ElectionApp() {
                 },
                 onNotificationChange = { changeNotifications(it) },
                 onRefresh = {
+                    // Solicita nova consulta sem fechar o menu nem perder o foco.
                     if (electionMode == "governador") governorRetry++
                     else if (!manualMode) needsRetry++
-                    dismissOptions()
                 }
             )
         }
         // A intensidade não depende de um booleano: segue o deslocamento da folha,
         // acompanhando também o gesto de fechamento, sem saltos bruscos.
-        val menuBackgroundBlur = if (Build.VERSION.SDK_INT >= 31) (sheetReveal * 8f).dp else 0.dp
+        val menuBackgroundBlur = if (Build.VERSION.SDK_INT >= 31) (visibleOverlay * 8f).dp else 0.dp
         val edgeFadeColor = Fundo // capturado fora do DrawScope
         Scaffold(
             modifier = Modifier.fillMaxSize()
+                .onSizeChanged { windowHeightPx = it.height.toFloat() }
                 .nestedScroll(chromeNestedScroll)
                 .blur(menuBackgroundBlur),
             containerColor = Fundo,
@@ -1631,6 +1693,15 @@ private fun ElectionApp() {
             } // Área de conteúdo e dock
 
         }
+        // Scrim próprio: o padrão do ModalBottomSheet escurecia instantaneamente
+        // quando o diálogo desaparecia. A camada segue a mesma animação do blur.
+        if (visibleOverlay > 0.001f) {
+            Box(
+                Modifier.fillMaxSize().background(
+                    Color.Black.copy(alpha = visibleOverlay * if (darkMode) 0.35f else 0.12f)
+                )
+            )
+        }
         } // CompositionLocalProvider: paleta claro/escuro de toda a interface
     }
 }
@@ -1642,6 +1713,10 @@ private fun ElectionApp() {
 private fun ElectionOptionsSheet(
     sheetState: SheetState,
     onSheetHeight: (Float) -> Unit,
+    dragOffsetPx: Float,
+    onDragBy: (Float) -> Unit,
+    onDragFinished: () -> Unit,
+    onDragCancelled: () -> Unit,
     electionMode: String,
     selectedGovernor: String,
     automatic: Boolean,
@@ -1662,24 +1737,52 @@ private fun ElectionOptionsSheet(
     val isGovernor = electionMode == "governador"
     var showGovernorList by remember(isGovernor) { mutableStateOf(isGovernor) }
     var showSourceInfo by remember { mutableStateOf(false) }
+    var refreshRequested by remember { mutableStateOf(false) }
+    LaunchedEffect(status) { refreshRequested = false }
     val panel = LocalAppPalette.current
     val lightCard = panel.surface.copy(alpha = if (darkMode) 0.97f else 0.94f)
     val captionSize = 12.sp
 
+    // Não reiniciar o detector a cada pixel arrastado: isso quebrava os gestos rápidos.
+    val latestDragBy by rememberUpdatedState(onDragBy)
+    val latestDragFinished by rememberUpdatedState(onDragFinished)
+    val latestDragCancelled by rememberUpdatedState(onDragCancelled)
+    val dragGesture = Modifier.pointerInput(Unit) {
+        detectVerticalDragGestures(
+            onVerticalDrag = { change, amount ->
+                change.consume()
+                latestDragBy(amount)
+            },
+            onDragEnd = { latestDragFinished() },
+            onDragCancel = { latestDragCancelled() }
+        )
+    }
     ModalBottomSheet(
         sheetState = sheetState,
+        // Evita a disputa entre a rolagem do conteúdo e o arrasto nativo
+        // (causava o movimento repetido para cima/baixo nos swipes rápidos).
+        sheetGesturesEnabled = false,
         onDismissRequest = onDismiss,
-        modifier = Modifier.onSizeChanged { onSheetHeight(it.height.toFloat()) },
+        modifier = Modifier
+            .onSizeChanged { onSheetHeight(it.height.toFloat()) }
+            .graphicsLayer { translationY = dragOffsetPx },
         shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp),
         containerColor = panel.sheet,
-        scrimColor = Color.Black.copy(alpha = if (darkMode) 0.52f else 0.13f),
+        // A intensidade do fundo é controlada pela tela principal para que
+        // a saída seja suave inclusive ao fechar por gesto e pelo botão Voltar.
+        scrimColor = Color.Transparent,
         dragHandle = {
             Box(
-                Modifier.padding(top = 12.dp, bottom = 8.dp)
-                    .size(width = 38.dp, height = 4.dp)
-                    .clip(RoundedCornerShape(100.dp))
-                    .background(if (darkMode) panel.secondary else Color(0xFFBBC4D1))
-            )
+                Modifier.fillMaxWidth().then(dragGesture)
+                    .padding(top = 12.dp, bottom = 12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    Modifier.size(width = 38.dp, height = 4.dp)
+                        .clip(RoundedCornerShape(100.dp))
+                        .background(if (darkMode) panel.secondary else Color(0xFFBBC4D1))
+                )
+            }
         }
     ) {
         Column(
@@ -1690,7 +1793,7 @@ private fun ElectionOptionsSheet(
                 .padding(bottom = 26.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().then(dragGesture), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Text("Opções", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = Tinta)
                     Text(
@@ -1840,9 +1943,15 @@ private fun ElectionOptionsSheet(
                             modifier = Modifier.weight(1f))
                     }
                     if (isGovernor || automatic) {
-                        Button(onClick = onRefresh, modifier = Modifier.fillMaxWidth(),
+                        Button(onClick = {
+                            refreshRequested = true
+                            onRefresh()
+                        }, modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(14.dp)) {
                             Text("Atualizar agora", fontSize = 13.sp)
+                        }
+                        if (refreshRequested) {
+                            Text("Atualização solicitada ao TSE…", fontSize = 12.sp, color = Secundario)
                         }
                     } else {
                         Text("Seus dados manuais são salvos automaticamente neste aparelho.",
