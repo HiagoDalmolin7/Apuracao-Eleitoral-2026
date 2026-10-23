@@ -98,6 +98,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.sp
 import org.json.JSONObject
@@ -1043,7 +1044,6 @@ private fun ElectionApp() {
     // Usa a altura realmente medida da janela, sem estimar o tamanho do modal.
     // A posição permanece estável mesmo durante gestos rápidos e mudanças de layout.
     var windowHeightPx by remember { mutableFloatStateOf(0f) }
-    var sheetDragPx by remember { mutableFloatStateOf(0f) }
     var sheetGesturePx by remember { mutableFloatStateOf(0f) }
     var sheetExpandedToTop by remember { mutableStateOf(false) }
     var closingOptions by remember { mutableStateOf(false) }
@@ -1053,7 +1053,7 @@ private fun ElectionApp() {
             else {
                 val nativeY = runCatching { optionsSheetState.requireOffset() }.getOrNull()
                 if (nativeY == null || !nativeY.isFinite()) 0f
-                else ((windowHeightPx - nativeY - sheetDragPx) / sheetHeightPx)
+                else ((windowHeightPx - nativeY) / sheetHeightPx)
                     .coerceIn(0f, 1f)
             }
         }
@@ -1074,7 +1074,6 @@ private fun ElectionApp() {
                 if (optionsSheetState.isVisible) optionsSheetState.hide()
             } finally {
                 showOptions = false
-                sheetDragPx = 0f
                 sheetGesturePx = 0f
                 sheetExpandedToTop = false
                 closingOptions = false
@@ -1085,27 +1084,15 @@ private fun ElectionApp() {
         val upThreshold = with(density) { 48.dp.toPx() }
         val downThreshold = with(density) { 68.dp.toPx() }
         when {
-            sheetGesturePx < -upThreshold && !sheetExpandedToTop -> sheetExpandedToTop = true
+            sheetGesturePx < -upThreshold -> sheetExpandedToTop = true
             sheetGesturePx > downThreshold && sheetExpandedToTop -> sheetExpandedToTop = false
             sheetGesturePx > downThreshold -> dismissOptions()
         }
+        // Sem translationY e sem corrotinas de retorno concorrentes.
+        // Só uma animação de altura (StableExpandableSheetBody) controla a folha.
         sheetGesturePx = 0f
-        if (!closingOptions) {
-            sheetScope.launch {
-                animate(sheetDragPx, 0f, animationSpec = tween(170)) { value, _ ->
-                    sheetDragPx = value
-                }
-            }
-        }
     }
-    fun cancelSheetDrag() {
-        sheetGesturePx = 0f
-        sheetScope.launch {
-            animate(sheetDragPx, 0f, animationSpec = tween(170)) { value, _ ->
-                sheetDragPx = value
-            }
-        }
-    }
+    fun cancelSheetDrag() { sheetGesturePx = 0f }
     // O modo manual utiliza as mesmas chaves da versão original (uf_SC, uf_GO...).
     // Os arquivos oficiais ficam SOMENTE em tse_json_*, sem sobrescrever a digitação.
     var manualMode by remember { mutableStateOf(prefs.getBoolean("modo_manual", false)) }
@@ -1406,14 +1393,12 @@ private fun ElectionApp() {
             ElectionOptionsSheet(
                 sheetState = optionsSheetState,
                 onSheetHeight = { sheetHeightPx = it },
-                dragOffsetPx = sheetDragPx,
                 expandedToTop = sheetExpandedToTop,
                 onDragBy = { delta ->
                     // Drag para cima amplia a folha; para baixo recolhe ou fecha.
                     // A rolagem da lista abaixo é independente deste detector.
                     sheetGesturePx = (sheetGesturePx + delta)
-                        .coerceIn(-with(density) { 120.dp.toPx() }, sheetHeightPx * 0.85f)
-                    sheetDragPx = sheetGesturePx.coerceAtLeast(0f)
+                        .coerceIn(-with(density) { 180.dp.toPx() }, with(density) { 180.dp.toPx() })
                 },
                 onDragFinished = { finishSheetDrag() },
                 onDragCancelled = { cancelSheetDrag() },
@@ -1735,6 +1720,37 @@ private fun ElectionApp() {
     }
 }
 
+
+// Estrutura compartilhada dos menus: a altura EXTERNA permanece fixa.
+// Apenas o painel interno cresce/recolhe, impedindo o reancoramento que causava
+// vibração quando a folha chegava ao topo e o usuário deslizava de volta.
+@Composable
+private fun StableExpandableSheetBody(
+    expanded: Boolean,
+    compactHeight: Dp,
+    panelColor: Color,
+    onTapOutsidePanel: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val fullHeight = (androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp - 30.dp)
+        .coerceAtLeast(300.dp)
+    val compact = minOf(compactHeight, fullHeight)
+    val panelHeight by animateDpAsState(
+        targetValue = if (expanded) fullHeight else compact,
+        animationSpec = tween(durationMillis = 275),
+        label = "Expansão estável do menu"
+    )
+    Column(Modifier.fillMaxWidth().height(fullHeight)) {
+        Spacer(Modifier.fillMaxWidth().weight(1f).clickable(onClick = onTapOutsidePanel))
+        Column(
+            Modifier.fillMaxWidth().height(panelHeight)
+                .clip(RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp))
+                .background(panelColor),
+            content = content
+        )
+    }
+}
+
 // Menu compacto de preferências acessível pelos três pontos ou pelo subtítulo.
 // Todas as opções permanecem disponíveis, mas fora da área dos resultados.
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1742,7 +1758,6 @@ private fun ElectionApp() {
 private fun ElectionOptionsSheet(
     sheetState: SheetState,
     onSheetHeight: (Float) -> Unit,
-    dragOffsetPx: Float,
     expandedToTop: Boolean,
     onDragBy: (Float) -> Unit,
     onDragFinished: () -> Unit,
@@ -1793,43 +1808,32 @@ private fun ElectionOptionsSheet(
         // (causava o movimento repetido para cima/baixo nos swipes rápidos).
         sheetGesturesEnabled = false,
         onDismissRequest = onDismiss,
-        modifier = Modifier
-            .onSizeChanged { onSheetHeight(it.height.toFloat()) }
-            .graphicsLayer { translationY = dragOffsetPx },
+        modifier = Modifier.onSizeChanged { onSheetHeight(it.height.toFloat()) },
         shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp),
-        containerColor = panel.sheet,
-        // A intensidade do fundo é controlada pela tela principal para que
-        // a saída seja suave inclusive ao fechar por gesto e pelo botão Voltar.
+        containerColor = Color.Transparent,
+        // Scrim próprio da tela principal com opacidade progressiva.
         scrimColor = Color.Transparent,
-        dragHandle = {
-            Box(
-                Modifier.fillMaxWidth().then(dragGesture)
-                    .padding(top = 12.dp, bottom = 12.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Box(
-                    Modifier.size(width = 38.dp, height = 4.dp)
-                        .clip(RoundedCornerShape(100.dp))
-                        .background(if (darkMode) panel.secondary else Color(0xFFBBC4D1))
-                )
-            }
-        }
+        dragHandle = null
     ) {
-        val screenHeight = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp
-        // Compacto ao abrir; ao deslizar o cabeçalho para cima, ocupa a área útil
-        // perto da status bar, sem cortá-la nem fazer o título desaparecer.
-        val nearFullHeight = (screenHeight - 30.dp).coerceAtLeast(300.dp)
-        val compactHeight = minOf(650.dp, nearFullHeight)
-        val animatedSheetHeight by animateDpAsState(
-            targetValue = if (expandedToTop) nearFullHeight else compactHeight,
-            animationSpec = tween(durationMillis = 260),
-            label = "Altura da folha de opções"
-        )
-        Column(
-            modifier = Modifier.fillMaxWidth().height(animatedSheetHeight)
-                .padding(horizontal = 18.dp).padding(bottom = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+        StableExpandableSheetBody(
+            expanded = expandedToTop,
+            compactHeight = 650.dp,
+            panelColor = panel.sheet,
+            onTapOutsidePanel = onDismiss
         ) {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp)
+                    .padding(bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+            // Arraste só pela alça/cabeçalho; a lista rola livremente, sem conflito.
+            Box(Modifier.fillMaxWidth().then(dragGesture)
+                    .padding(top = 12.dp, bottom = 8.dp),
+                contentAlignment = Alignment.Center) {
+                Box(Modifier.size(width = 38.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(100.dp))
+                    .background(if (darkMode) panel.secondary else Color(0xFFBBC4D1)))
+            }
             Row(Modifier.fillMaxWidth().then(dragGesture), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Text("Opções", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = Tinta)
@@ -2019,7 +2023,8 @@ private fun ElectionOptionsSheet(
                 )
             }
             } // Conteúdo rolável: título permanece visível
-        }
+            } // Painel interno (altura animada)
+        } // Âncora externa estável
     }
 }
 
@@ -2123,19 +2128,62 @@ private fun RegionPickerPill(
                 }
             }
         }
+        var pickerExpanded by remember { mutableStateOf(false) }
+        var pickerDrag by remember { mutableFloatStateOf(0f) }
+        val dragThreshold = with(LocalDensity.current) { 60.dp.toPx() }
+        val pickerDragGesture = Modifier.pointerInput(Unit) {
+            detectVerticalDragGestures(
+                onVerticalDrag = { change, amount ->
+                    change.consume()
+                    pickerDrag = (pickerDrag + amount).coerceIn(-300f, 300f)
+                },
+                onDragEnd = {
+                    when {
+                        pickerDrag < -dragThreshold -> pickerExpanded = true
+                        pickerDrag > dragThreshold && pickerExpanded -> pickerExpanded = false
+                        pickerDrag > dragThreshold -> dismissPicker()
+                    }
+                    pickerDrag = 0f
+                },
+                onDragCancel = { pickerDrag = 0f }
+            )
+        }
         ModalBottomSheet(
             sheetState = pickerState,
+            sheetGesturesEnabled = false,
             onDismissRequest = { dismissPicker() },
-            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-            containerColor = palette.sheet,
-            scrimColor = Color.Black.copy(alpha = 0.25f)
+            shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp),
+            containerColor = Color.Transparent,
+            scrimColor = Color.Black.copy(alpha = 0.25f),
+            dragHandle = null
         ) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp)) {
-                Text(title, color = palette.text, fontWeight = FontWeight.Bold, fontSize = 22.sp)
-                Text("Selecione uma região", color = palette.secondary, fontSize = 12.sp)
+            StableExpandableSheetBody(
+                expanded = pickerExpanded,
+                compactHeight = 610.dp,
+                panelColor = palette.sheet,
+                onTapOutsidePanel = { dismissPicker() }
+            ) {
+                Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
+                Box(Modifier.fillMaxWidth().then(pickerDragGesture)
+                        .padding(top = 12.dp, bottom = 10.dp),
+                    contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(width = 38.dp, height = 4.dp)
+                        .clip(RoundedCornerShape(100.dp))
+                        .background(palette.secondary.copy(alpha = 0.55f)))
+                }
+                Row(Modifier.fillMaxWidth().then(pickerDragGesture),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(title, color = palette.text, fontWeight = FontWeight.Bold, fontSize = 22.sp)
+                        Text("Selecione uma região", color = palette.secondary, fontSize = 12.sp)
+                    }
+                    TextButton(onClick = { dismissPicker() }) {
+                        Text("Fechar", color = palette.accent)
+                    }
+                }
                 Spacer(Modifier.height(12.dp))
                 androidx.compose.foundation.lazy.LazyColumn(
-                    modifier = Modifier.fillMaxWidth().heightIn(max = 545.dp),
+                    modifier = Modifier.fillMaxWidth().weight(1f),
                     contentPadding = PaddingValues(bottom = 20.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
@@ -2178,7 +2226,8 @@ private fun RegionPickerPill(
                         }
                     }
                 }
-            }
+                } // Conteúdo do seletor de UF
+            } // Âncora estável do seletor de UF
         }
     }
 }
@@ -3339,11 +3388,33 @@ private fun insidePolygon(point: Offset, polygon: List<Offset>): Boolean {
     return inside
 }
 
-private fun mapColor(result: Estimate, first: Color = Verde, second: Color = Vermelho,
-                     missing: Color = Color(0xFFE2E7ED)): Color {
+// Cor do vencedor apenas: intensidade proporcional à vantagem, sem misturar verde/vermelho.
+// Empate exato recebe uma cor neutra. Verde ou vermelho puros representam 100% dos votos.
+private fun winningMapColor(
+    result: Estimate,
+    first: Color = Verde,
+    second: Color = Vermelho,
+    missing: Color = Color(0xFFE2E7ED),
+    dark: Boolean = false
+): Color {
     if (!result.valid || result.validos <= 0) return missing
     val shareA = (result.a / result.validos).toFloat().coerceIn(0f, 1f)
-    return lerp(second, first, shareA)
+    if (kotlin.math.abs(shareA - 0.5f) < 0.000001f) {
+        return if (dark) Color(0xFF66758B) else Color(0xFFAEB8C6)
+    }
+    val candidateAWon = shareA > 0.5f
+    val winner = if (candidateAWon) first else second
+    // Tons de base pastel cuidadosamente separados também em 51/49 ou 60/40.
+    // No escuro, a base tem mais contraste com o fundo do mapa.
+    val soft = when {
+        dark && candidateAWon -> Color(0xFF365D4B)
+        dark -> Color(0xFF78464B)
+        candidateAWon -> Color(0xFF9FD5B5)
+        else -> Color(0xFFF0AAA7)
+    }
+    val winnerShare = maxOf(shareA, 1f - shareA)
+    val strength = ((winnerShare - 0.5f) * 2f).coerceIn(0f, 1f)
+    return lerp(soft, winner, strength)
 }
 
 @Composable
@@ -3390,8 +3461,8 @@ private fun BrazilStateMap(
                 if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
             path.close()
-            drawPath(path, color = mapColor(estimates.getValue(state.uf), colorA, colorB,
-                mapPalette.emptyState))
+            drawPath(path, color = winningMapColor(estimates.getValue(state.uf), colorA, colorB,
+                mapPalette.emptyState, dark = mapPalette == DarkPalette))
             drawPath(
                 path,
                 color = if (selected == state.uf) mapSelectedBorder else mapOutline,
@@ -3429,19 +3500,34 @@ private fun MapPage(
             }
             BrazilStateMap(geometry, computed, picked, onSelected = { picked = it })
             Text(
-                if (manualMode) "Cores calculadas com os votos que você digitou em cada UF."
-                else "Cores calculadas a partir dos votos oficiais apurados em cada UF.",
+                if (manualMode) "Cor do candidato à frente, com intensidade conforme os votos digitados em cada UF."
+                else "Cor do candidato à frente, com intensidade conforme os votos oficiais apurados em cada UF.",
                 fontSize = 12.sp, color = Secundario
             )
+            // Escala de duas famílias de cor, sem o marrom criado pela mistura anterior.
+            val darkMap = LocalAppPalette.current == DarkPalette
+            val softRed = if (darkMap) Color(0xFF78464B) else Color(0xFFF0AAA7)
+            val softGreen = if (darkMap) Color(0xFF365D4B) else Color(0xFF9FD5B5)
+            val tied = if (darkMap) Color(0xFF66758B) else Color(0xFFAEB8C6)
             Box(
                 Modifier.fillMaxWidth().height(13.dp).clip(RoundedCornerShape(99.dp))
-                    .background(Brush.horizontalGradient(listOf(Vermelho, lerp(Vermelho, Verde, .5f), Verde)))
+                    .background(Brush.horizontalGradient(
+                        0f to Vermelho,
+                        0.485f to softRed,
+                        0.499f to softRed,
+                        0.5f to tied,
+                        0.501f to softGreen,
+                        0.515f to softGreen,
+                        1f to Verde
+                    ))
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("100% $candidateB", fontSize = 11.sp, color = Tinta)
-                Text("50% / 50%", fontSize = 11.sp, color = Tinta)
+                Text("Empate", fontSize = 11.sp, color = Tinta)
                 Text("100% $candidateA", fontSize = 11.sp, color = Tinta)
             }
+            Text("A cor mostra quem lidera; quanto mais intensa, maior sua vantagem. " +
+                "Cinza central = empate.", fontSize = 11.sp, color = Secundario)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Box(Modifier.size(11.dp).background(LocalAppPalette.current.emptyState, RoundedCornerShape(3.dp)))
                 Text("Cinza = sem votos oficiais disponíveis", fontSize = 12.sp, color = Secundario)
