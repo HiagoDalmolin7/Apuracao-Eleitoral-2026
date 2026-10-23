@@ -1,6 +1,26 @@
 package br.com.apuracaoeleitoral
 
 import android.os.Bundle
+import android.os.Build
+import android.Manifest
+import android.app.Service
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.os.IBinder
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancel
 import android.content.SharedPreferences
 import java.net.URL
 import java.net.HttpURLConnection
@@ -545,7 +565,236 @@ private fun nameForRegion(uf: String): String = if (uf == "ZZ") "Exterior (ZZ)" 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Retoma a sessão SOMENTE se o usuário havia ativado a notificação.
+        val prefs = getSharedPreferences("apuracao_v2", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("notificacao_projecao_ativa", false) && notificationsAllowed(this)) {
+            runCatching { startProjectionService(this) }.onFailure {
+                prefs.edit().putBoolean("notificacao_projecao_ativa", false).apply()
+            }
+        }
         setContent { ElectionApp() }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        ProjectionNotificationService.appVisible = true
+    }
+
+    override fun onStop() {
+        ProjectionNotificationService.appVisible = false
+        super.onStop()
+    }
+}
+
+
+// === Notificação persistente opcional da projeção ===
+// Enquanto o app estiver visível, a tela consulta o TSE e o serviço usa o cache.
+// Em segundo plano, este serviço dataSync mantém uma consulta a cada ~60 segundos.
+private const val PROJECTION_CHANNEL = "apuracao_projecao_2026"
+private const val PROJECTION_NOTIFICATION_ID = 2026
+private const val PROJECTION_STOP_ACTION = "br.com.apuracaoeleitoral.STOP_PROJECTION"
+private const val PROJECTION_REFRESH_ACTION = "br.com.apuracaoeleitoral.REFRESH_PROJECTION"
+
+private fun notificationsAllowed(context: Context): Boolean =
+    Build.VERSION.SDK_INT < 33 || context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+private fun startProjectionService(context: Context) {
+    context.startForegroundService(Intent(context, ProjectionNotificationService::class.java))
+}
+
+private fun stopProjectionService(context: Context) {
+    context.stopService(Intent(context, ProjectionNotificationService::class.java))
+}
+
+private fun refreshProjectionNotification(context: Context) {
+    // Apenas atualizar quando o serviço já foi solicitado pelo usuário.
+    if (context.getSharedPreferences("apuracao_v2", Context.MODE_PRIVATE)
+            .getBoolean("notificacao_projecao_ativa", false)) {
+        runCatching {
+            context.startService(Intent(context, ProjectionNotificationService::class.java)
+                .setAction(PROJECTION_REFRESH_ACTION))
+        }
+    }
+}
+
+class ProjectionNotificationService : Service() {
+    companion object {
+        @Volatile var appVisible: Boolean = false
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var pollingJob: Job? = null
+    private val backoffUntil = mutableMapOf<String, Long>()
+    private lateinit var preferences: SharedPreferences
+    private lateinit var manager: NotificationManager
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        preferences = getSharedPreferences("apuracao_v2", Context.MODE_PRIVATE)
+        manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.createNotificationChannel(
+            NotificationChannel(PROJECTION_CHANNEL, "Projeção da apuração", NotificationManager.IMPORTANCE_LOW)
+                .apply { description = "Mostra a projeção atual enquanto a apuração está sendo acompanhada." }
+        )
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == PROJECTION_STOP_ACTION) {
+            endSession()
+            return START_NOT_STICKY
+        }
+        if (!preferences.getBoolean("notificacao_projecao_ativa", false)) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        // Iniciar a notificação IMEDIATAMENTE, antes de executar qualquer requisição.
+        val initial = makeNotification()
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(PROJECTION_NOTIFICATION_ID, initial, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(PROJECTION_NOTIFICATION_ID, initial)
+        }
+        if (pollingJob == null || pollingJob?.isActive != true) {
+            pollingJob = scope.launch {
+                while (isActive) {
+                    if (!appVisible) syncInBackground()
+                    manager.notify(PROJECTION_NOTIFICATION_ID, makeNotification())
+                    delay(if (appVisible) 15_000L else TSE_INTERVAL_MS)
+                }
+            }
+        } else if (intent?.action == PROJECTION_REFRESH_ACTION) {
+            scope.launch { manager.notify(PROJECTION_NOTIFICATION_ID, makeNotification()) }
+        }
+        // Não reiniciar silenciosamente se o sistema encerrar o serviço.
+        return START_NOT_STICKY
+    }
+
+    private suspend fun syncInBackground() {
+        // Nunca consultar resultados presidenciais enquanto o usuário estiver em modo manual.
+        if (preferences.getString("eleicao_2026", "presidente") == "governador") {
+            val uf = preferences.getString("governador_uf_2026", "AC") ?: "AC"
+            if (uf !in GOVERNOR_UFS) return
+            val id = "gov_$uf"
+            if (System.currentTimeMillis() < (backoffUntil[id] ?: 0L)) return
+            val result = fetchGovernor(preferences, uf)
+            if (result.report != null && result.json != null) {
+                preferences.edit().putString("tse_gov_json_$uf", result.json)
+                    .putLong("tse_gov_last_ok", System.currentTimeMillis()).apply()
+                val old = readEvolution(preferences, id)
+                addEvolution(preferences, id, old, governorEvolution(result.report, System.currentTimeMillis()))
+            } else if (result.status == 404 || result.status == 403 || result.status == 429) {
+                backoffUntil[id] = System.currentTimeMillis() + 300_000L
+            }
+            return
+        }
+        if (preferences.getBoolean("modo_manual", false)) return
+        // Consulta em pequenos lotes, reutilizando a lógica, os validadores e o cache existentes.
+        val semaphore = Semaphore(3)
+        val regions = TSE_LOCATIONS.filter {
+            System.currentTimeMillis() >= (backoffUntil[it] ?: 0L)
+        }
+        if (regions.isEmpty()) return
+        val results = coroutineScope {
+            regions.map { uf -> async { semaphore.withPermit { fetchTseRegion(preferences, uf) } } }.awaitAll()
+        }
+        var newData = false
+        results.forEach { result ->
+            if (result.report != null && result.json != null) {
+                val editor = preferences.edit().putString("tse_json_${result.region}", result.json)
+                result.etag?.let { editor.putString("tse_etag_${result.region}", it) }
+                result.lastModified?.let { editor.putString("tse_modified_${result.region}", it) }
+                editor.apply()
+                newData = true
+            } else if (result.errorCode == 403 || result.errorCode == 404 || result.errorCode == 429) {
+                backoffUntil[result.region] = System.currentTimeMillis() +
+                    if (result.errorCode == 404) 240_000L else 300_000L
+            }
+        }
+        if (newData) {
+            preferences.edit().putLong("tse_last_ok", System.currentTimeMillis()).apply()
+            val official = TSE_LOCATIONS.mapNotNull { uf ->
+                preferences.getString("tse_json_$uf", null)?.let { json ->
+                    parseTseReport(json, uf)?.let { uf to it }
+                }
+            }.toMap()
+            addEvolution(preferences, "presidente_tse", readEvolution(preferences, "presidente_tse"),
+                presidentEvolution(official, null, System.currentTimeMillis()))
+        }
+    }
+
+    private fun makeNotification(): Notification {
+        val (heading, line) = currentProjection()
+        val openApp = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val stop = PendingIntent.getService(
+            this, 1,
+            Intent(this, ProjectionNotificationService::class.java).setAction(PROJECTION_STOP_ACTION),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return Notification.Builder(this, PROJECTION_CHANNEL)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle(heading)
+            .setContentText(line)
+            .setStyle(Notification.BigTextStyle().bigText(line))
+            .setContentIntent(openApp)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(Notification.CATEGORY_STATUS)
+            .addAction(Notification.Action.Builder(null, "Encerrar", stop).build())
+            .build()
+    }
+
+    private fun currentProjection(): Pair<String, String> {
+        if (preferences.getString("eleicao_2026", "presidente") == "governador") {
+            val uf = preferences.getString("governador_uf_2026", "AC") ?: "AC"
+            val report = preferences.getString("tse_gov_json_$uf", null)
+                ?.let { parseGovernorReport(it, uf) }
+            if (report == null || !report.hasVotes || report.candidates.size != 2) {
+                return "Projeção • Governador $uf" to "Aguardando votos oficiais"
+            }
+            val a = report.projected[0]
+            val b = report.projected[1]
+            val total = a + b
+            if (total <= 0) return "Projeção • Governador $uf" to "Aguardando apuração"
+            return "Projeção • Governador $uf" to
+                "${report.candidates[0].name}: ${percentage(a / total * 100)}  •  ${report.candidates[1].name}: ${percentage(b / total * 100)}"
+        }
+        val manual = preferences.getBoolean("modo_manual", false)
+        val states = (UFS + "ZZ").map { uf ->
+            if (manual) loadState(preferences.getString("uf_$uf", null), uf)
+            else preferences.getString("tse_json_$uf", null)
+                ?.let { parseTseReport(it, uf) }?.let { stateFromOfficial(it) } ?: StateData(uf)
+        }
+        val good = states.map(::estimate).filter { it.valid }
+        val a = good.sumOf { it.a }
+        val b = good.sumOf { it.b }
+        val total = a + b
+        if (total <= 0) return "Projeção • Presidente" to
+            (if (manual) "Sem dados manuais para projetar" else "Aguardando votos do TSE")
+        return "Projeção • Presidente" to
+            "Flávio Bolsonaro: ${percentage(a / total * 100)}  •  Lula: ${percentage(b / total * 100)}"
+    }
+
+    private fun endSession() {
+        preferences.edit().putBoolean("notificacao_projecao_ativa", false).apply()
+        pollingJob?.cancel()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    // Android 15+: o serviço dataSync precisa parar imediatamente quando atingir a cota.
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        endSession()
+    }
+
+    override fun onDestroy() {
+        scope.cancel()
+        super.onDestroy()
     }
 }
 
@@ -595,6 +844,64 @@ private fun ElectionApp() {
     // O modo manual utiliza as mesmas chaves da versão original (uf_SC, uf_GO...).
     // Os arquivos oficiais ficam SOMENTE em tse_json_*, sem sobrescrever a digitação.
     var manualMode by remember { mutableStateOf(prefs.getBoolean("modo_manual", false)) }
+    var notificationOn by remember { mutableStateOf(prefs.getBoolean("notificacao_projecao_ativa", false)) }
+    var notificationError by remember { mutableStateOf(false) }
+    val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            prefs.edit().putBoolean("notificacao_projecao_ativa", true).apply()
+            notificationOn = true
+            notificationError = false
+            runCatching { startProjectionService(context) }.onFailure {
+                notificationOn = false
+                prefs.edit().putBoolean("notificacao_projecao_ativa", false).apply()
+                notificationError = true
+            }
+        } else {
+            notificationOn = false
+            prefs.edit().putBoolean("notificacao_projecao_ativa", false).apply()
+            notificationError = true
+        }
+    }
+    DisposableEffect(activity) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                notificationOn = prefs.getBoolean("notificacao_projecao_ativa", false)
+                // O serviço pode ter atualizado o cache enquanto o app estava em segundo plano.
+                reports = TSE_LOCATIONS.mapNotNull { uf ->
+                    prefs.getString("tse_json_$uf", null)?.let { json ->
+                        parseTseReport(json, uf)?.let { uf to it }
+                    }
+                }.toMap()
+                governorReports = GOVERNOR_UFS.mapNotNull { uf ->
+                    prefs.getString("tse_gov_json_$uf", null)?.let { json ->
+                        parseGovernorReport(json, uf)?.let { uf to it }
+                    }
+                }.toMap()
+                autoEvolution = readEvolution(prefs, "presidente_tse")
+                governorEvolutionHistory = GOVERNOR_UFS.associateWith { readEvolution(prefs, "gov_$it") }
+            }
+        }
+        activity.lifecycle.addObserver(observer)
+        onDispose { activity.lifecycle.removeObserver(observer) }
+    }
+    fun changeNotifications(enabled: Boolean) {
+        notificationError = false
+        if (!enabled) {
+            prefs.edit().putBoolean("notificacao_projecao_ativa", false).apply()
+            notificationOn = false
+            stopProjectionService(context)
+        } else if (notificationsAllowed(context)) {
+            prefs.edit().putBoolean("notificacao_projecao_ativa", true).apply()
+            notificationOn = true
+            runCatching { startProjectionService(context) }.onFailure {
+                notificationOn = false
+                notificationError = true
+                prefs.edit().putBoolean("notificacao_projecao_ativa", false).apply()
+            }
+        } else if (Build.VERSION.SDK_INT >= 33) {
+            permissionRequest.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     var manualStates by remember {
         mutableStateOf((UFS + "ZZ").associateWith { uf ->
             loadState(prefs.getString("uf_$uf", null), uf)
@@ -603,6 +910,7 @@ private fun ElectionApp() {
     fun updateManual(updated: StateData) {
         manualStates = manualStates + (updated.uf to updated)
         prefs.edit().putString("uf_${updated.uf}", updated.asJson()).apply()
+        refreshProjectionNotification(context)
     }
 
     // Atualiza a cada 60 segundos enquanto o aplicativo está aberto em primeiro plano.
@@ -669,6 +977,7 @@ private fun ElectionApp() {
             }
             edit.apply()
             reports = updated
+            refreshProjectionNotification(context)
             unavailable = failures + retryAfter.keys.filter { System.currentTimeMillis() < (retryAfter[it] ?: 0L) }
             loading = false
             // Bloqueio temporário 403/429: recuar em vez de sobrecarregar o servidor.
@@ -729,6 +1038,7 @@ private fun ElectionApp() {
                 }
             }
             governorReports = revised
+            refreshProjectionNotification(context)
             if (success) {
                 governorLastGood = System.currentTimeMillis()
                 changes.putLong("tse_gov_last_ok", governorLastGood)
@@ -838,6 +1148,7 @@ private fun ElectionApp() {
                             electionMode = "presidente"
                             tab = 0
                             prefs.edit().putString("eleicao_2026", electionMode).apply()
+                            refreshProjectionNotification(context)
                         },
                         onGovernor = { uf ->
                             electionMode = "governador"
@@ -845,6 +1156,7 @@ private fun ElectionApp() {
                             tab = 0
                             prefs.edit().putString("eleicao_2026", electionMode)
                                 .putString("governador_uf_2026", selectedGovernorUF).apply()
+                            refreshProjectionNotification(context)
                         }
                     )
                     if (electionMode == "presidente") DataModeSwitch(
@@ -852,7 +1164,13 @@ private fun ElectionApp() {
                         onAutomaticChange = { enabled ->
                             manualMode = !enabled
                             prefs.edit().putBoolean("modo_manual", !enabled).apply()
+                            refreshProjectionNotification(context)
                         }
+                    )
+                    ProjectionNotificationSwitch(
+                        active = notificationOn,
+                        error = notificationError,
+                        onToggle = { changeNotifications(it) }
                     )
                 }
             },
@@ -992,6 +1310,24 @@ private fun ElectionApp() {
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ProjectionNotificationSwitch(active: Boolean, error: Boolean, onToggle: (Boolean) -> Unit) {
+    Surface(color = Color.White) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f)) {
+                    Text("Notificação da projeção", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = Tinta)
+                    Text("Atualizações mesmo com o app em segundo plano", fontSize = 11.sp, color = Secundario)
+                }
+                Switch(checked = active, onCheckedChange = onToggle,
+                    colors = SwitchDefaults.colors(checkedTrackColor = Azul))
+            }
+            if (error) Text("Autorize as notificações nas configurações do Android para usar este recurso.",
+                fontSize = 11.sp, color = Vermelho)
         }
     }
 }
