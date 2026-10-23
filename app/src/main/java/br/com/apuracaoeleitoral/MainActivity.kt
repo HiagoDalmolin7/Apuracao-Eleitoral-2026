@@ -70,6 +70,8 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -841,6 +843,7 @@ private fun ElectionApp() {
     }
     var selectedUF by remember { mutableStateOf("SC") }
     var tab by remember { mutableIntStateOf(0) }
+    var showOptions by remember { mutableStateOf(false) }
     // O modo manual utiliza as mesmas chaves da versão original (uf_SC, uf_GO...).
     // Os arquivos oficiais ficam SOMENTE em tse_json_*, sem sobrescrever a digitação.
     var manualMode by remember { mutableStateOf(prefs.getBoolean("modo_manual", false)) }
@@ -1106,72 +1109,111 @@ private fun ElectionApp() {
             onSurface = Tinta, onBackground = Tinta
         ), typography = Typography()
     ) {
+        if (showOptions) {
+            ElectionOptionsSheet(
+                electionMode = electionMode,
+                selectedGovernor = selectedGovernorUF,
+                automatic = !manualMode,
+                notificationEnabled = notificationOn,
+                notificationError = notificationError,
+                status = if (electionMode == "governador") {
+                    when {
+                        governorLoading -> "Sincronizando resultados estaduais..."
+                        governorLastGood > 0L -> "Última atualização: ${clockTime(governorLastGood)}"
+                        else -> "Aguardando dados oficiais do TSE"
+                    }
+                } else status,
+                onDismiss = { showOptions = false },
+                onPresident = {
+                    electionMode = "presidente"
+                    tab = 0
+                    prefs.edit().putString("eleicao_2026", "presidente").apply()
+                    refreshProjectionNotification(context)
+                },
+                onGovernor = { uf ->
+                    electionMode = "governador"
+                    selectedGovernorUF = uf
+                    tab = 0
+                    prefs.edit().putString("eleicao_2026", "governador")
+                        .putString("governador_uf_2026", uf).apply()
+                    refreshProjectionNotification(context)
+                },
+                onAutomaticChange = { enabled ->
+                    manualMode = !enabled
+                    prefs.edit().putBoolean("modo_manual", !enabled).apply()
+                    refreshProjectionNotification(context)
+                },
+                onNotificationChange = { changeNotifications(it) },
+                onRefresh = {
+                    if (electionMode == "governador") governorRetry++
+                    else if (!manualMode) needsRetry++
+                    showOptions = false
+                }
+            )
+        }
         Scaffold(
             containerColor = Fundo,
             topBar = {
-                // Android 15/16/17 podem desenhar atrás da barra de status.
-                // Reservamos explicitamente a área segura, inclusive com câmera/notch.
-                // TopAppBar e seletor de modo precisam estar na MESMA coluna
-                // para que o Scaffold considere a altura de ambos.
-                Column(
-                    modifier = Modifier.fillMaxWidth().statusBarsPadding()
-                ) {
+                // Header compacto: todas as configurações foram movidas para um menu modal.
+                // A área superior respeita o recorte da câmera e a barra de status do Android.
+                Column(Modifier.fillMaxWidth().statusBarsPadding()) {
                     TopAppBar(
-                        // A coluna já aplica o espaço da barra de status.
-                        // Desativamos o inset interno para evitar espaço duplicado.
                         windowInsets = WindowInsets(0, 0, 0, 0),
                         title = {
-                            Column {
-                                Text("Apuração Eleitoral 2026", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                                Text(
-                                    if (electionMode == "governador") "Governador • 2º turno • TSE"
-                                    else if (manualMode) "Presidência • 2º turno • Manual" else "Presidência • 2º turno • TSE",
-                                    fontSize = 12.sp, color = Secundario
-                                )
+                            Column(
+                                modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                    .clickable { showOptions = true }
+                                    .padding(vertical = 3.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text("Apuração Eleitoral 2026", fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp, color = Tinta, maxLines = 1)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        if (electionMode == "governador") "Governador • $selectedGovernorUF • TSE"
+                                        else if (manualMode) "Presidente • Brasil • Manual"
+                                        else "Presidente • Brasil • TSE",
+                                        fontSize = 11.sp, color = Secundario, maxLines = 1
+                                    )
+                                    Text("  ⌄", fontSize = 14.sp, color = Azul)
+                                }
                             }
                         },
                         actions = {
                             if (electionMode == "governador" || !manualMode) {
-                                if (if (electionMode == "governador") governorLoading else loading) CircularProgressIndicator(
-                                    modifier = Modifier.padding(end = 13.dp).size(18.dp), strokeWidth = 2.dp
-                                ) else TextButton(onClick = {
-                                    if (electionMode == "governador") governorRetry++ else needsRetry++
-                                }) { Text("Atualizar", fontSize = 12.sp) }
+                                if (if (electionMode == "governador") governorLoading else loading) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.padding(horizontal = 10.dp).size(18.dp),
+                                        strokeWidth = 2.dp, color = Azul
+                                    )
+                                } else {
+                                    IconButton(
+                                        onClick = {
+                                            if (electionMode == "governador") governorRetry++ else needsRetry++
+                                        },
+                                        modifier = Modifier.semantics { contentDescription = "Atualizar resultados agora" }
+                                    ) {
+                                        Text("↻", fontSize = 26.sp, color = Azul)
+                                    }
+                                }
+                            }
+                            IconButton(
+                                onClick = { showOptions = true },
+                                modifier = Modifier.padding(end = 7.dp)
+                                    .semantics { contentDescription = "Abrir menu de opções" }
+                            ) {
+                                Box(
+                                    Modifier.size(38.dp).clip(CircleShape)
+                                        .background(Color(0xFFF0F3F8)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("⋮", fontSize = 25.sp, color = Tinta, lineHeight = 28.sp)
+                                }
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
                     )
-                    ElectionChoice(
-                        selectedElection = electionMode,
-                        selectedGovernor = selectedGovernorUF,
-                        onPresident = {
-                            electionMode = "presidente"
-                            tab = 0
-                            prefs.edit().putString("eleicao_2026", electionMode).apply()
-                            refreshProjectionNotification(context)
-                        },
-                        onGovernor = { uf ->
-                            electionMode = "governador"
-                            selectedGovernorUF = uf
-                            tab = 0
-                            prefs.edit().putString("eleicao_2026", electionMode)
-                                .putString("governador_uf_2026", selectedGovernorUF).apply()
-                            refreshProjectionNotification(context)
-                        }
-                    )
-                    if (electionMode == "presidente") DataModeSwitch(
-                        automatic = !manualMode,
-                        onAutomaticChange = { enabled ->
-                            manualMode = !enabled
-                            prefs.edit().putBoolean("modo_manual", !enabled).apply()
-                            refreshProjectionNotification(context)
-                        }
-                    )
-                    ProjectionNotificationSwitch(
-                        active = notificationOn,
-                        error = notificationError,
-                        onToggle = { changeNotifications(it) }
-                    )
+                    HorizontalDivider(color = Borda, thickness = 0.8.dp)
                 }
             },
             bottomBar = {
@@ -1314,47 +1356,164 @@ private fun ElectionApp() {
     }
 }
 
+// Menu compacto de preferências acessível pelos três pontos ou pelo subtítulo.
+// Todas as opções permanecem disponíveis, mas fora da área dos resultados.
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ProjectionNotificationSwitch(active: Boolean, error: Boolean, onToggle: (Boolean) -> Unit) {
-    Surface(color = Color.White) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.weight(1f)) {
-                    Text("Notificação da projeção", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = Tinta)
-                    Text("Atualizações mesmo com o app em segundo plano", fontSize = 11.sp, color = Secundario)
-                }
-                Switch(checked = active, onCheckedChange = onToggle,
-                    colors = SwitchDefaults.colors(checkedTrackColor = Azul))
-            }
-            if (error) Text("Autorize as notificações nas configurações do Android para usar este recurso.",
-                fontSize = 11.sp, color = Vermelho)
-        }
-    }
-}
-
-@Composable
-private fun DataModeSwitch(automatic: Boolean, onAutomaticChange: (Boolean) -> Unit) {
-    Surface(color = Color.White, tonalElevation = 1.dp) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 10.dp, top = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+private fun ElectionOptionsSheet(
+    electionMode: String,
+    selectedGovernor: String,
+    automatic: Boolean,
+    notificationEnabled: Boolean,
+    notificationError: Boolean,
+    status: String,
+    onDismiss: () -> Unit,
+    onPresident: () -> Unit,
+    onGovernor: (String) -> Unit,
+    onAutomaticChange: (Boolean) -> Unit,
+    onNotificationChange: (Boolean) -> Unit,
+    onRefresh: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+        containerColor = Color(0xFFF7F9FC),
+        dragHandle = { BottomSheetDefaults.DragHandle() }
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().heightIn(max = 690.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 26.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text("Fonte da apuração", fontSize = 12.sp, color = Secundario)
-                Text(
-                    if (automatic) "Automático • TSE" else "Manual • edição liberada",
-                    fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = Tinta
-                )
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Opções da apuração", color = Tinta, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                    Text("Personalize a eleição e a atualização dos dados",
+                        fontSize = 12.sp, color = Secundario)
+                }
+                TextButton(onClick = onDismiss) { Text("Concluir", color = Azul) }
             }
-            Text("Manual", fontSize = 11.sp, color = if (!automatic) Azul else Secundario)
-            Switch(
-                checked = automatic,
-                onCheckedChange = onAutomaticChange,
-                modifier = Modifier.padding(horizontal = 7.dp),
-                colors = SwitchDefaults.colors(checkedTrackColor = Azul)
-            )
-            Text("TSE", fontSize = 11.sp, color = if (automatic) Azul else Secundario)
+
+            Surface(shape = RoundedCornerShape(18.dp), color = Color.White,
+                border = BorderStroke(1.dp, Borda)) {
+                Column(Modifier.fillMaxWidth().padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("ELEIÇÃO", fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                        color = Secundario, letterSpacing = 1.sp)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (electionMode == "presidente") {
+                            Button(onClick = onPresident, modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(11.dp), contentPadding = PaddingValues(horizontal = 6.dp)) {
+                                Text("Presidente", maxLines = 1, fontSize = 13.sp)
+                            }
+                        } else {
+                            OutlinedButton(onClick = onPresident, modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(11.dp), contentPadding = PaddingValues(horizontal = 6.dp)) {
+                                Text("Presidente", maxLines = 1, fontSize = 13.sp)
+                            }
+                        }
+                        if (electionMode == "governador") {
+                            Button(onClick = { onGovernor(selectedGovernor) }, modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(11.dp), contentPadding = PaddingValues(horizontal = 6.dp)) {
+                                Text("Governador", maxLines = 1, fontSize = 13.sp)
+                            }
+                        } else {
+                            OutlinedButton(onClick = { onGovernor(selectedGovernor) }, modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(11.dp), contentPadding = PaddingValues(horizontal = 6.dp)) {
+                                Text("Governador", maxLines = 1, fontSize = 13.sp)
+                            }
+                        }
+                    }
+                    if (electionMode == "governador") {
+                        HorizontalDivider(color = Borda)
+                        Text("Segundo turno por estado", fontSize = 12.sp, color = Secundario)
+                        GOVERNOR_UFS.chunked(3).forEach { group ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                group.forEach { uf ->
+                                    if (uf == selectedGovernor) {
+                                        Button(onClick = { onGovernor(uf) }, modifier = Modifier.weight(1f),
+                                            shape = RoundedCornerShape(10.dp),
+                                            contentPadding = PaddingValues(horizontal = 2.dp)) {
+                                            Text(uf, fontSize = 13.sp)
+                                        }
+                                    } else {
+                                        OutlinedButton(onClick = { onGovernor(uf) }, modifier = Modifier.weight(1f),
+                                            shape = RoundedCornerShape(10.dp),
+                                            contentPadding = PaddingValues(horizontal = 2.dp)) {
+                                            Text(uf, fontSize = 13.sp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Surface(shape = RoundedCornerShape(18.dp), color = Color.White,
+                border = BorderStroke(1.dp, Borda)) {
+                Column(Modifier.fillMaxWidth().padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(13.dp)) {
+                    Text("PREFERÊNCIAS", fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                        color = Secundario, letterSpacing = 1.sp)
+                    if (electionMode == "presidente") {
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text("Dados automáticos do TSE", fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold, color = Tinta)
+                                Text(if (automatic) "Fonte oficial selecionada" else "Digitação manual habilitada",
+                                    fontSize = 11.sp, color = Secundario)
+                            }
+                            Switch(checked = automatic, onCheckedChange = onAutomaticChange,
+                                colors = SwitchDefaults.colors(checkedTrackColor = Azul))
+                        }
+                        HorizontalDivider(color = Borda)
+                    } else {
+                        Text("Governadores: dados oficiais do TSE, sem preenchimento manual.",
+                            fontSize = 12.sp, color = Secundario)
+                        HorizontalDivider(color = Borda)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text("Notificação da projeção", fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold, color = Tinta)
+                            Text("Acompanhar em segundo plano", fontSize = 11.sp, color = Secundario)
+                        }
+                        Switch(checked = notificationEnabled, onCheckedChange = onNotificationChange,
+                            colors = SwitchDefaults.colors(checkedTrackColor = Azul))
+                    }
+                    if (notificationError) {
+                        Text("Para ativar, permita as notificações nas configurações do Android.",
+                            fontSize = 11.sp, color = Vermelho)
+                    }
+                }
+            }
+
+            Surface(shape = RoundedCornerShape(18.dp), color = Color.White,
+                border = BorderStroke(1.dp, Borda)) {
+                Column(Modifier.fillMaxWidth().padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("SINCRONIZAÇÃO", fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                        color = Secundario, letterSpacing = 1.sp)
+                    Text(status, fontSize = 12.sp, color = Secundario)
+                    if (electionMode == "governador" || automatic) {
+                        OutlinedButton(onClick = onRefresh, shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()) {
+                            Text("↻  Atualizar dados agora", color = Azul, fontSize = 13.sp)
+                        }
+                    } else {
+                        Text("Os dados manuais são salvos automaticamente no celular.",
+                            fontSize = 12.sp, color = Secundario)
+                    }
+                }
+            }
+            Text("Aplicativo independente • Resultados oficiais do TSE e projeções matemáticas não oficiais.",
+                fontSize = 11.sp, color = Secundario, textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth())
         }
     }
 }
@@ -2023,46 +2182,6 @@ private fun OfficialStatistics(
         }
         Note("Este aplicativo é independente e não representa o TSE. Os totais oficiais são publicados pelo Tribunal; os números projetados são cálculos proporcionais do aplicativo.")
         if (failed.isNotEmpty()) Text("Sem atualização recente: ${failed.sorted().joinToString()}", color = Aviso, fontSize = 12.sp)
-    }
-}
-
-// === Seletor de eleições do segundo turno ===
-@Composable
-private fun ElectionChoice(
-    selectedElection: String,
-    selectedGovernor: String,
-    onPresident: () -> Unit,
-    onGovernor: (String) -> Unit
-) {
-    var open by remember { mutableStateOf(false) }
-    Surface(color = Color.White) {
-        Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
-            OutlinedButton(
-                onClick = { open = true },
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("Eleição selecionada", color = Secundario, fontSize = 11.sp)
-                    Text(if (selectedElection == "governador") "Governador — $selectedGovernor" else "Presidente — Brasil",
-                        fontWeight = FontWeight.Bold, color = Tinta, fontSize = 14.sp)
-                }
-                Text("⌄", color = Azul, fontSize = 20.sp)
-            }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                DropdownMenuItem(
-                    text = { Text("Presidente — Brasil", fontWeight = FontWeight.SemiBold) },
-                    onClick = { onPresident(); open = false }
-                )
-                HorizontalDivider()
-                GOVERNOR_UFS.forEach { uf ->
-                    DropdownMenuItem(
-                        text = { Text("Governador — $uf") },
-                        onClick = { onGovernor(uf); open = false }
-                    )
-                }
-            }
-        }
     }
 }
 
