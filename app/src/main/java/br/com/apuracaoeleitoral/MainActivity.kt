@@ -362,6 +362,8 @@ private object OfficialUpdateSound {
 
     private fun play(context: Context) {
         if (!mayPlay(context)) return
+        // Som de apuração tem prioridade: evita sobreposição com easter eggs.
+        CandidateEasterEggAudio.stop()
         val resource = context.resources.getIdentifier("som_urna", "raw", context.packageName)
         if (resource == 0) return
         try {
@@ -386,6 +388,52 @@ private object OfficialUpdateSound {
         } catch (_: Exception) {
             activePlayer?.runCatching { release() }
             activePlayer = null
+        }
+    }
+}
+
+// Easter eggs exclusivos dos retratos presidenciais na aba Painel.
+// O volume segue o canal de mídia. Apenas um easter egg toca por vez.
+private object CandidateEasterEggAudio {
+    private var currentPlayer: MediaPlayer? = null
+
+    fun play(context: Context, candidateNumber: Int) {
+        val soundId = when (candidateNumber) {
+            22 -> R.raw.easter_egg_flavio
+            13 -> R.raw.easter_egg_lula
+            else -> return
+        }
+        stop()
+        try {
+            val attributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+            val player = MediaPlayer.create(context.applicationContext, soundId, attributes, 0)
+                ?: return
+            currentPlayer = player
+            player.setOnCompletionListener { mp ->
+                if (currentPlayer === mp) currentPlayer = null
+                mp.release()
+            }
+            player.setOnErrorListener { mp, _, _ ->
+                if (currentPlayer === mp) currentPlayer = null
+                mp.release()
+                true
+            }
+            player.start()
+        } catch (_: Exception) {
+            stop()
+        }
+    }
+
+    fun stop() {
+        val previous = currentPlayer
+        currentPlayer = null
+        previous?.runCatching {
+            setOnCompletionListener(null)
+            setOnErrorListener(null)
+            release()
         }
     }
 }
@@ -1720,7 +1768,8 @@ private fun ElectionApp() {
                         candidateA = labelsA, candidateB = labelsB,
                         states = manualStates, computed = projections,
                         onChoose = { selectedUF = it; tab = 1 },
-                        onStates = { tab = 1 }
+                        onStates = { tab = 1 },
+                        onEasterEgg = { number -> CandidateEasterEggAudio.play(context, number) }
                     )
                     1 -> ManualRegions(
                         modifier = Modifier.padding(padding),
@@ -1764,7 +1813,8 @@ private fun ElectionApp() {
                         stateEstimates = projections, status = status,
                         failed = unavailable,
                         onChoose = { selectedUF = it; tab = 1 },
-                        onStates = { tab = 1 }
+                        onStates = { tab = 1 },
+                        onEasterEgg = { number -> CandidateEasterEggAudio.play(context, number) }
                     )
                     1 -> OfficialRegions(
                         modifier = Modifier.padding(padding),
@@ -2199,7 +2249,8 @@ private fun ManualDashboard(
     modifier: Modifier,
     candidateA: String, candidateB: String,
     states: Map<String, StateData>, computed: Map<String, Estimate>,
-    onChoose: (String) -> Unit, onStates: () -> Unit
+    onChoose: (String) -> Unit, onStates: () -> Unit,
+    onEasterEgg: (Int) -> Unit
 ) {
     val valid = computed.filterValues { it.valid }
     val a = valid.values.sumOf { it.a }
@@ -2213,13 +2264,19 @@ private fun ManualDashboard(
             Text("${valid.size} de 28 regiões preenchidas (27 UFs + exterior)", color = Secundario, fontSize = 12.sp)
             if (sum > 0.0) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    CandidateInfo(candidateA, a, a / sum, Verde, Modifier.weight(1f))
-                    CandidateInfo(candidateB, b, b / sum, Vermelho, Modifier.weight(1f))
+                    CandidateInfo(candidateA, a, a / sum, Verde, Modifier.weight(1f),
+                        onPortraitClick = { onEasterEgg(22) }, portraitOverride = R.drawable.candidato_flavio)
+                    CandidateInfo(candidateB, b, b / sum, Vermelho, Modifier.weight(1f),
+                        onPortraitClick = { onEasterEgg(13) }, portraitOverride = R.drawable.candidato_lula)
                 }
                 RatioBar(a, b, thickness = 14)
                 SummaryLine("Diferença projetada", "${count(abs(a-b))} votos")
                 SummaryLine("Votos válidos informados", count(observed))
-            } else Text("Digite votos e o percentual de urnas de pelo menos uma região para calcular.", color = Secundario)
+            } else {
+                Text("Digite votos e o percentual de urnas de pelo menos uma região para calcular.",
+                    color = Secundario)
+                EasterEggPortraits(candidateA, candidateB, onEasterEgg)
+            }
             if (valid.size < 28) Text(
                 "Faltam ${28-valid.size} regiões na projeção. A soma acima é parcial; não representa necessariamente o Brasil inteiro.",
                 color = Aviso, fontSize = 12.sp
@@ -2748,21 +2805,25 @@ private fun CandidatePortrait(
     name: String,
     accent: Color,
     size: Dp = 44.dp,
-    corner: Dp = 12.dp
+    corner: Dp = 12.dp,
+    portraitOverride: Int? = null,
+    onClick: (() -> Unit)? = null
 ) {
-    val portrait = candidatePortraitResource(name)
+    val portrait = portraitOverride ?: candidatePortraitResource(name)
+    val interaction = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     if (portrait != null) {
         val shape = RoundedCornerShape(corner)
         Image(
             painter = painterResource(id = portrait),
-            contentDescription = "Retrato ilustrado de $name",
+            contentDescription = if (onClick != null) "Ouvir easter egg de $name" else "Retrato ilustrado de $name",
             contentScale = ContentScale.Crop,
             modifier = Modifier.size(size)
-                .clip(shape)
+                .clip(shape).then(interaction)
                 .border(1.dp, accent.copy(alpha = 0.55f), shape)
         )
     } else {
         Box(Modifier.size(size).clip(RoundedCornerShape(corner))
+            .then(interaction)
             .background(accent.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
             Box(Modifier.size(10.dp).clip(CircleShape).background(accent))
         }
@@ -2770,11 +2831,17 @@ private fun CandidatePortrait(
 }
 
 @Composable
-private fun CandidateInfo(name: String, votes: Double, share: Double, color: Color, modifier: Modifier = Modifier) {
+private fun CandidateInfo(
+    name: String, votes: Double, share: Double, color: Color,
+    modifier: Modifier = Modifier,
+    onPortraitClick: (() -> Unit)? = null,
+    portraitOverride: Int? = null
+) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            CandidatePortrait(name = name, accent = color, size = 46.dp, corner = 12.dp)
+            CandidatePortrait(name = name, accent = color, size = 46.dp, corner = 12.dp,
+                portraitOverride = portraitOverride, onClick = onPortraitClick)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text(name, maxLines = 2, fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold, lineHeight = 15.sp,
@@ -2785,6 +2852,31 @@ private fun CandidateInfo(name: String, votes: Double, share: Double, color: Col
         }
         Text(percentage(share * 100), color = Tinta, fontWeight = FontWeight.ExtraBold, fontSize = 28.sp)
         Text("${count(votes)} votos", fontSize = 12.sp, color = Secundario)
+    }
+}
+
+@Composable
+private fun EasterEggPortraits(
+    candidateA: String, candidateB: String,
+    onEasterEgg: (Int) -> Unit
+) {
+    Text("Toque na foto de um candidato para ouvir o easter egg.",
+        color = Secundario, fontSize = 12.sp)
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            CandidatePortrait(candidateA, Verde, size = 66.dp, corner = 18.dp,
+                portraitOverride = R.drawable.candidato_flavio,
+                onClick = { onEasterEgg(22) })
+            Text(candidateA, fontSize = 11.sp, maxLines = 1, color = Tinta)
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            CandidatePortrait(candidateB, Vermelho, size = 66.dp, corner = 18.dp,
+                portraitOverride = R.drawable.candidato_lula,
+                onClick = { onEasterEgg(13) })
+            Text(candidateB, fontSize = 11.sp, maxLines = 1, color = Tinta)
+        }
     }
 }
 
@@ -2880,7 +2972,8 @@ private fun OfficialDashboard(
     national: TseReport?, exterior: TseReport?,
     projectedA: Double, projectedB: Double,
     stateEstimates: Map<String, Estimate>, status: String,
-    failed: Set<String>, onChoose: (String) -> Unit, onStates: () -> Unit
+    failed: Set<String>, onChoose: (String) -> Unit, onStates: () -> Unit,
+    onEasterEgg: (Int) -> Unit
 ) {
     val validOfficial = national?.takeIf { it.hasVotes }
     val validProjection = stateEstimates.values.count { it.valid }
@@ -2894,6 +2987,9 @@ private fun OfficialDashboard(
             if (validOfficial == null) {
                 Text("Aguardando divulgação de votos do segundo turno pelo TSE.", color = Secundario)
                 Text("Dados ainda não publicados não são contabilizados como zero.", fontSize = 12.sp, color = Secundario)
+                if (allProjected <= 0.0) {
+                    EasterEggPortraits(candidateA, candidateB, onEasterEgg)
+                }
             } else {
                 Text("${percentage(validOfficial.sectionsPercent)} das seções totalizadas", fontWeight = FontWeight.SemiBold)
                 LinearProgressIndicator(
@@ -2903,9 +2999,11 @@ private fun OfficialDashboard(
                 )
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     CandidateInfo(candidateA, validOfficial.candidate22.toDouble(),
-                        validOfficial.candidate22.toDouble() / validOfficial.validVotes, Verde, Modifier.weight(1f))
+                        validOfficial.candidate22.toDouble() / validOfficial.validVotes, Verde, Modifier.weight(1f),
+                        onPortraitClick = { onEasterEgg(22) }, portraitOverride = R.drawable.candidato_flavio)
                     CandidateInfo(candidateB, validOfficial.candidate13.toDouble(),
-                        validOfficial.candidate13.toDouble() / validOfficial.validVotes, Vermelho, Modifier.weight(1f))
+                        validOfficial.candidate13.toDouble() / validOfficial.validVotes, Vermelho, Modifier.weight(1f),
+                        onPortraitClick = { onEasterEgg(13) }, portraitOverride = R.drawable.candidato_lula)
                 }
                 RatioBar(validOfficial.candidate22.toDouble(), validOfficial.candidate13.toDouble(), thickness = 14)
                 SummaryLine("Votos válidos contabilizados", count(validOfficial.validVotes.toDouble()))
@@ -2921,8 +3019,10 @@ private fun OfficialDashboard(
                 Text("Sem votos suficientes para estimar o restante.", color = Secundario)
             } else {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    CandidateInfo(candidateA, projectedA, projectedA / allProjected, Verde, Modifier.weight(1f))
-                    CandidateInfo(candidateB, projectedB, projectedB / allProjected, Vermelho, Modifier.weight(1f))
+                    CandidateInfo(candidateA, projectedA, projectedA / allProjected, Verde, Modifier.weight(1f),
+                        onPortraitClick = { onEasterEgg(22) }, portraitOverride = R.drawable.candidato_flavio)
+                    CandidateInfo(candidateB, projectedB, projectedB / allProjected, Vermelho, Modifier.weight(1f),
+                        onPortraitClick = { onEasterEgg(13) }, portraitOverride = R.drawable.candidato_lula)
                 }
                 RatioBar(projectedA, projectedB, thickness = 14)
                 SummaryLine("Diferença estimada", "${count(abs(projectedA-projectedB))} votos")
