@@ -36,9 +36,15 @@ jobs:
       - name: Gerar APK
         run: gradle :app:assembleDebug --no-daemon
 
+      - name: Renomear APK
+        run: |
+          set -euo pipefail
+          mv "app/build/outputs/apk/debug/app-debug.apk" \
+            "app/build/outputs/apk/debug/Apuração Eleitoral 2026.apk"
+
       - name: Disponibilizar APK
         uses: actions/upload-artifact@v7
         with:
           name: ApuracaoEleitoral-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: 'app/build/outputs/apk/debug/Apuração Eleitoral 2026.apk'
           if-no-files-found: error
