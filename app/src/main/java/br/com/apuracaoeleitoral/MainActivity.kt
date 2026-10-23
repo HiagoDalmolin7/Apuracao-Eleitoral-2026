@@ -15,6 +15,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
+import android.graphics.BitmapFactory
+import java.io.File
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -69,6 +71,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
@@ -357,7 +362,7 @@ private object OfficialUpdateSound {
     fun playForFreshData(context: Context, prefs: SharedPreferences) {
         // O anúncio de vitória tem prioridade e não deve ser interrompido pelo som curto.
         if (PresidentialVictoryAudio.isPlaying()) return
-        if (!prefs.getBoolean(PREF_ENABLED, false) || !hasFile(context) || !mayPlay(context)) return
+        if (!prefs.getBoolean(PREF_ENABLED, true) || !hasFile(context) || !mayPlay(context)) return
         val now = SystemClock.elapsedRealtime()
         synchronized(lock) {
             val last = prefs.getLong(LAST_PLAYED, -1L)
@@ -1481,7 +1486,7 @@ private fun ElectionApp() {
     var manualMode by remember { mutableStateOf(prefs.getBoolean("modo_manual", false)) }
     var notificationOn by remember { mutableStateOf(prefs.getBoolean("notificacao_projecao_ativa", false)) }
     var urnaSoundEnabled by remember {
-        mutableStateOf(prefs.getBoolean(OfficialUpdateSound.PREF_ENABLED, false))
+        mutableStateOf(prefs.getBoolean(OfficialUpdateSound.PREF_ENABLED, true))
     }
     var victorySoundEnabled by remember {
         mutableStateOf(prefs.getBoolean(PresidentialVictoryAudio.PREF_ENABLED, true))
@@ -2621,12 +2626,20 @@ private fun ElectionOptionsSheet(
                         }
                     }
                     HorizontalDivider(color = Borda)
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
                             Text("Som de vitória presidencial", color = Tinta,
                                 fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                             Text("Uma vez por eleição, somente quando a vantagem oficial for irreversível",
-                                fontSize = captionSize, color = Secundario)
+                                fontSize = captionSize, color = Secundario,
+                                lineHeight = 17.sp)
                         }
                         Switch(checked = victorySoundEnabled,
                             onCheckedChange = onVictorySoundEnabledChange,
@@ -2801,6 +2814,122 @@ private fun ManualDashboard(
     }
 }
 
+
+// Bandeiras padronizadas com fonte pública CC0:
+// https://github.com/pierrelapalu/icones-bandeiras-br-uf
+// A primeira consulta baixa cada PNG em tamanho pequeno e grava localmente.
+// Em visitas seguintes o ícone funciona offline, sem alterar os dados do TSE.
+private val STATE_FLAG_FILENAMES = mapOf(
+    "AC" to "02-acre-full.png", "AL" to "03-alagoas-full.png",
+    "AP" to "04-amapa-full.png", "AM" to "05-amazonas-full.png",
+    "BA" to "06-bahia-full.png", "CE" to "07-ceara-full-v2.png",
+    "DF" to "08-distrito-federal-full.png", "ES" to "09-espirito-santo-full-v2.png",
+    "GO" to "10-goias-full.png", "MA" to "11-maranhao-full.png",
+    "MT" to "12-mato-grosso-full.png", "MS" to "13-mato-grosso-do-sul-full.png",
+    "MG" to "14-minas-gerais-full.png", "PA" to "15-para-full.png",
+    "PB" to "16-paraiba-full-v2.png", "PR" to "17-parana-full.png",
+    "PE" to "18-pernambuco-full.png", "PI" to "19-piaui-full.png",
+    "RJ" to "20-rio-de-janeiro-full.png", "RN" to "21-rio-grande-do-norte-full.png",
+    "RS" to "22-rio-grande-do-sul-full.png", "RO" to "23-rondonia-full.png",
+    "RR" to "24-roraima-full.png", "SC" to "25-santa-catarina-full.png",
+    "SP" to "26-sao-paulo-full.png", "SE" to "27-sergipe-full.png",
+    "TO" to "28-tocantins-full.png"
+)
+
+private suspend fun loadStateFlag(context: Context, uf: String): ImageBitmap? =
+    withContext(Dispatchers.IO) {
+        val sourceName = STATE_FLAG_FILENAMES[uf] ?: return@withContext null
+        val directory = File(context.applicationContext.filesDir, "bandeiras_ufs_2026")
+        val destination = File(directory, "bandeira_${uf.lowercase(Locale.ROOT)}.png")
+        fun decode(file: File): ImageBitmap? =
+            runCatching { BitmapFactory.decodeFile(file.absolutePath)?.asImageBitmap() }.getOrNull()
+        if (destination.isFile) {
+            val saved = decode(destination)
+            if (saved != null) return@withContext saved
+            destination.delete() // pacote incompleto/corrompido: buscar novamente
+        }
+        try {
+            directory.mkdirs()
+            val sources = listOf(
+                "https://cdn.jsdelivr.net/gh/pierrelapalu/icones-bandeiras-br-uf@master/dist/full/png-200/$sourceName",
+                "https://raw.githubusercontent.com/pierrelapalu/icones-bandeiras-br-uf/master/dist/full/png-200/$sourceName"
+            )
+            for (url in sources) {
+                try {
+                    val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 5500
+                        readTimeout = 5500
+                        instanceFollowRedirects = true
+                    }
+                    val bytes = try {
+                        if (connection.responseCode != HttpURLConnection.HTTP_OK) continue
+                        connection.inputStream.use { input ->
+                            // Limite de tamanho para não carregar arquivos inesperados.
+                            val output = java.io.ByteArrayOutputStream()
+                            val chunk = ByteArray(4096)
+                            while (output.size() <= 250_000) {
+                                val n = input.read(chunk)
+                                if (n < 0) break
+                                output.write(chunk, 0, n)
+                            }
+                            output.toByteArray()
+                        }
+                    } finally { connection.disconnect() }
+                    if (bytes.isEmpty() || bytes.size > 250_000) continue
+                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: continue
+                    // Cache persistente: após o primeiro acesso as bandeiras funcionam offline.
+                    val temp = File.createTempFile("flag_${uf}_", ".png", directory)
+                    temp.writeBytes(bytes)
+                    if (!destination.exists()) temp.renameTo(destination)
+                    temp.delete()
+                    return@withContext bitmap.asImageBitmap()
+                } catch (_: Exception) {
+                    // Fonte alternativa ou falha de rede: segue sem bloquear o TSE.
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+@Composable
+private fun StateFlag(uf: String, modifier: Modifier = Modifier, width: Dp = 38.dp, height: Dp = 25.dp) {
+    val palette = LocalAppPalette.current
+    val context = LocalContext.current
+    val image by produceState<ImageBitmap?>(initialValue = null, key1 = uf) {
+        value = loadStateFlag(context, uf)
+    }
+    val shape = RoundedCornerShape(5.dp)
+    Box(
+        modifier = modifier.size(width = width, height = height)
+            .clip(shape).background(palette.surface)
+            .border(1.dp, palette.border, shape),
+        contentAlignment = Alignment.Center
+    ) {
+        if (uf == "ZZ") {
+            Text("🌐", fontSize = 17.sp, lineHeight = 18.sp)
+        } else if (image != null) {
+            Image(
+                bitmap = image!!,
+                contentDescription = "Bandeira de ${fullRegionName(uf)}",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit
+            )
+        } else {
+            Text(uf, fontSize = 10.sp, fontWeight = FontWeight.Medium, color = palette.secondary)
+        }
+    }
+}
+
+@Composable
+private fun RegionHeader(uf: String, size: Int = 20) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        StateFlag(uf, width = 43.dp, height = 29.dp)
+        Text(nameForRegion(uf), fontSize = size.sp, fontWeight = FontWeight.Bold, color = Tinta)
+    }
+}
+
 // Seletor visual unificado: pílula sem seta e folha modal com nomes de estados por extenso.
 // O valor persistido continua sendo a sigla oficial (inclusive ZZ para Exterior).
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2823,14 +2952,15 @@ private fun RegionPickerPill(
         border = BorderStroke(1.dp, palette.border),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
     ) {
-        Text(
-            text = nameForRegion(selected),
+        Row(
             modifier = if (compact) Modifier else Modifier.fillMaxWidth(),
-            textAlign = TextAlign.Center,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 15.sp,
-            maxLines = 1
-        )
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp, Alignment.CenterHorizontally)
+        ) {
+            StateFlag(selected, width = 31.dp, height = 21.dp)
+            Text(nameForRegion(selected), fontWeight = FontWeight.SemiBold,
+                fontSize = 15.sp, maxLines = 1)
+        }
     }
     if (pickerOpen) {
         val pickerState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -2936,6 +3066,7 @@ private fun RegionPickerPill(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
+                                StateFlag(uf, width = 41.dp, height = 27.dp)
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Text(fullRegionName(uf), color = palette.text,
                                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
@@ -2986,7 +3117,8 @@ private fun ManualRegions(
             )
         }
         SurfaceCard {
-            Text("Votos e apuração • ${nameForRegion(selected)}", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            RegionHeader(selected, size = 18)
+            Text("Votos e apuração", fontSize = 12.sp, color = Secundario)
             NumberField("Urnas apuradas (%)", state.urnas, { onUpdate(state.copy(urnas = it)) }, decimal = true)
             NumberField("Votos de $candidateA", state.a, { onUpdate(state.copy(a = it)) })
             NumberField("Votos de $candidateB", state.b, { onUpdate(state.copy(b = it)) })
@@ -3017,8 +3149,13 @@ private fun ManualRegions(
             (UFS + "ZZ").forEach { uf ->
                 val entry = all.getValue(uf)
                 Column(Modifier.clickable { onSelect(uf) }.padding(vertical = 5.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(nameForRegion(uf), fontWeight = FontWeight.Medium)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            StateFlag(uf)
+                            Text(nameForRegion(uf), fontWeight = FontWeight.Medium)
+                        }
                         Text(if (quantity(entry.a) + quantity(entry.b) > 0) "${entry.urnas.ifBlank { "0" }}% das urnas" else "—", fontSize = 12.sp, color = Secundario)
                     }
                     if (quantity(entry.a) + quantity(entry.b) > 0) RatioBar(quantity(entry.a), quantity(entry.b), thickness = 7)
@@ -3312,7 +3449,7 @@ private fun CandidatePortrait(
         val shape = RoundedCornerShape(corner)
         Image(
             painter = painterResource(id = portrait),
-            contentDescription = if (onClick != null) "Toque três vezes para ouvir o easter egg de $name" else "Retrato ilustrado de $name",
+            contentDescription = "Retrato ilustrado de $name",
             contentScale = ContentScale.Crop,
             modifier = Modifier.size(size)
                 .clip(shape).then(interaction)
@@ -3357,8 +3494,6 @@ private fun EasterEggPortraits(
     candidateA: String, candidateB: String,
     onEasterEgg: (Int) -> Unit
 ) {
-    Text("Toque 3 vezes seguidas na foto para ouvir o easter egg.",
-        color = Secundario, fontSize = 12.sp)
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
         Column(horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -3598,7 +3733,11 @@ private fun MiniStat(label: String, value: String, modifier: Modifier) {
 private fun StateSummaryRow(uf: String, data: Estimate, onClick: () -> Unit) {
     Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 7.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text(uf, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                StateFlag(uf, width = 34.dp, height = 23.dp)
+                Text(uf, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            }
             Text("${percentage(data.urnas)} das urnas", fontSize = 12.sp, color = Secundario)
         }
         RatioBar(data.a, data.b, thickness = 8)
@@ -3656,7 +3795,7 @@ private fun OfficialRegions(
             if (selected == "ZZ") Text("Total de votos do exterior. Não há mapa por país.", fontSize = 12.sp, color = Secundario)
         }
         SurfaceCard {
-            Text(nameForRegion(selected), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            RegionHeader(selected, size = 22)
             if (report == null) {
                 Text("Arquivo da região ainda não disponível. A consulta será repetida automaticamente.", color = Secundario)
             } else {
@@ -3699,8 +3838,13 @@ private fun OfficialRegions(
             (UFS + "ZZ").forEach { region ->
                 val item = all[region]
                 Column(Modifier.fillMaxWidth().clickable { onSelect(region) }.padding(vertical = 5.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(nameForRegion(region), fontWeight = FontWeight.Medium)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            StateFlag(region)
+                            Text(nameForRegion(region), fontWeight = FontWeight.Medium)
+                        }
                         Text(if (item?.hasVotes == true) percentage(item.sectionsPercent) else "—", fontSize = 12.sp, color = Secundario)
                     }
                     if (item?.hasVotes == true) RatioBar(item.candidate22.toDouble(), item.candidate13.toDouble(), thickness = 7)
