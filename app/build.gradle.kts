@@ -1,6 +1,6 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.plugin.compose") version "2.4.21"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.2.0"
 }
 
 android {
@@ -39,9 +39,6 @@ dependencies {
     implementation("androidx.compose.animation:animation")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.0")
 
-    // Blur real da pílula flutuante, compatível com Jetpack Compose.
-    implementation("dev.chrisbanes.haze:haze:2.0.1")
-    implementation("dev.chrisbanes.haze:haze-blur:2.0.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
