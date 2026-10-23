@@ -343,6 +343,8 @@ private object OfficialUpdateSound {
     }
 
     fun playForFreshData(context: Context, prefs: SharedPreferences) {
+        // O anúncio de vitória tem prioridade e não deve ser interrompido pelo som curto.
+        if (PresidentialVictoryAudio.isPlaying()) return
         if (!prefs.getBoolean(PREF_ENABLED, false) || !hasFile(context) || !mayPlay(context)) return
         val now = SystemClock.elapsedRealtime()
         synchronized(lock) {
@@ -360,9 +362,20 @@ private object OfficialUpdateSound {
         return "Reprodução de teste solicitada."
     }
 
+    fun stop() {
+        handler.post {
+            activePlayer?.runCatching {
+                setOnCompletionListener(null)
+                setOnErrorListener(null)
+                release()
+            }
+            activePlayer = null
+        }
+    }
+
     private fun play(context: Context) {
-        if (!mayPlay(context)) return
-        // Som de apuração tem prioridade: evita sobreposição com easter eggs.
+        if (!mayPlay(context) || PresidentialVictoryAudio.isPlaying()) return
+        // Sons de apuração curtos não se sobrepõem aos easter eggs.
         CandidateEasterEggAudio.stop()
         val resource = context.resources.getIdentifier("som_urna", "raw", context.packageName)
         if (resource == 0) return
@@ -403,6 +416,8 @@ private object CandidateEasterEggAudio {
             13 -> R.raw.easter_egg_lula
             else -> return
         }
+        // Não interromper o anúncio definitivo durante a reprodução.
+        if (PresidentialVictoryAudio.isPlaying()) return
         stop()
         try {
             val attributes = AudioAttributes.Builder()
@@ -473,6 +488,115 @@ private data class TseReport(
     val hasVotes get() = sectionsDone > 0L && candidate22 + candidate13 > 0L
     val sectionsPercent get() = if (sectionsTotal > 0L) sectionsDone * 100.0 / sectionsTotal else 0.0
     val validVotes get() = candidate22 + candidate13
+}
+
+
+// Certificação conservadora de irreversibilidade matemática, SOMENTE com o
+// agregado oficial BR da presidência (turno 2, eleição validada no parser).
+// Não usa porcentagens projetadas, porcentagem de seções ou uma soma parcial de UFs.
+private data class MathematicalVictory(val candidateNumber: Int, val complete: Boolean)
+
+private fun mathematicalVictory(report: TseReport?): MathematicalVictory? {
+    if (report == null || report.location != "BR" || !report.hasVotes) return null
+    if (report.sectionsTotal <= 0L || report.sectionsDone !in 1L..report.sectionsTotal) return null
+    if (report.candidate22 == report.candidate13) return null
+    if (report.electorate <= 0L || report.turnout < report.validVotes ||
+        report.turnout > report.electorate) return null
+    if (report.officialValidVotes > 0L && report.validVotes > report.officialValidVotes) return null
+    if (report.totalBallots > 0L && report.validVotes > report.totalBallots) return null
+    val leader = if (report.candidate22 > report.candidate13) 22 else 13
+    // Eleitorado - comparecimento JÁ contado: limite máximo (superestimado) de
+    // votos que ainda poderiam ser dados ao adversário. Inclui até quem se
+    // absteve nas seções apuradas, então jamais depende da projeção regional.
+    val outstandingUpperBound = report.electorate - report.turnout
+    val lead = kotlin.math.abs(report.candidate22 - report.candidate13)
+    val complete = report.sectionsDone == report.sectionsTotal
+    if (complete || lead > outstandingUpperBound) {
+        return MathematicalVictory(leader, complete)
+    }
+    return null
+}
+
+// Alertas independentes da urna e dos easter eggs. A confirmação é persistida
+// por eleição/turno para não tocar novamente quando reiniciar o aplicativo.
+private object PresidentialVictoryAudio {
+    const val PREF_ENABLED = "som_vitoria_presidencial_ativo_2026"
+    private const val ANNOUNCED = "vitoria_matematica_6258_turno_2_anunciada"
+    private val lock = Any()
+    private val handler = Handler(Looper.getMainLooper())
+    @Volatile private var currentPlayer: MediaPlayer? = null
+
+    fun isPlaying(): Boolean = currentPlayer != null
+
+    fun onNewOfficialReport(context: Context, prefs: SharedPreferences,
+                            previous: TseReport?, current: TseReport): Boolean {
+        val winner = mathematicalVictory(current) ?: return false
+        // Só quando a liderança se tornou irreversível, não no próximo polling.
+        if (mathematicalVictory(previous) != null) return false
+        // Evita acionar em regressões de apuração ou respostas fora de ordem.
+        if (previous != null && (current.sectionsDone < previous.sectionsDone ||
+                current.candidate22 < previous.candidate22 ||
+                current.candidate13 < previous.candidate13)) return false
+        synchronized(lock) {
+            if (prefs.contains(ANNOUNCED)) return false
+            // commit síncrono evita repetições por duas consultas concorrentes.
+            if (!prefs.edit().putInt(ANNOUNCED, winner.candidateNumber).commit()) return false
+        }
+        if (prefs.getBoolean(PREF_ENABLED, true)) {
+            handler.post { play(context.applicationContext, winner.candidateNumber) }
+        }
+        return true
+    }
+
+    fun preview(context: Context, candidateNumber: Int): String {
+        if (!canPlay(context)) return "Ative o som do celular e aumente o volume de mídia."
+        handler.post { play(context.applicationContext, candidateNumber) }
+        return "Som de vitória solicitado."
+    }
+
+    private fun canPlay(context: Context): Boolean {
+        val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return audio.ringerMode == AudioManager.RINGER_MODE_NORMAL &&
+            audio.getStreamVolume(AudioManager.STREAM_MUSIC) > 0
+    }
+
+    private fun play(context: Context, number: Int) {
+        if (!canPlay(context)) return
+        val resource = when (number) {
+            22 -> R.raw.vitoria_flavio
+            13 -> R.raw.vitoria_lula
+            else -> return
+        }
+        OfficialUpdateSound.stop()
+        CandidateEasterEggAudio.stop()
+        try {
+            currentPlayer?.runCatching {
+                setOnCompletionListener(null)
+                setOnErrorListener(null)
+                release()
+            }
+            currentPlayer = null
+            val attributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+            val mp = MediaPlayer.create(context, resource, attributes, 0) ?: return
+            currentPlayer = mp
+            mp.setOnCompletionListener { finished ->
+                if (currentPlayer === finished) currentPlayer = null
+                finished.release()
+            }
+            mp.setOnErrorListener { failed, _, _ ->
+                if (currentPlayer === failed) currentPlayer = null
+                failed.release()
+                true
+            }
+            mp.start()
+        } catch (_: Exception) {
+            currentPlayer?.runCatching { release() }
+            currentPlayer = null
+        }
+    }
 }
 
 private fun JSONObject.longField(key: String): Long = optString(key, "0")
@@ -993,11 +1117,14 @@ class ProjectionNotificationService : Service() {
         }
         var newData = false
         var soundOnUpdate = false
+        var victoryEvent = false
         results.forEach { result ->
             if (result.report != null && result.json != null) {
                 val previous = preferences.getString("tse_json_${result.region}", null)
                     ?.let { parseTseReport(it, result.region) }
                 if (newPresidentialTally(previous, result.report)) soundOnUpdate = true
+                if (result.region == "BR" && PresidentialVictoryAudio.onNewOfficialReport(
+                        this, preferences, previous, result.report)) victoryEvent = true
                 val editor = preferences.edit().putString("tse_json_${result.region}", result.json)
                 result.etag?.let { editor.putString("tse_etag_${result.region}", it) }
                 result.lastModified?.let { editor.putString("tse_modified_${result.region}", it) }
@@ -1017,7 +1144,7 @@ class ProjectionNotificationService : Service() {
             }.toMap()
             addEvolution(preferences, "presidente_tse", readEvolution(preferences, "presidente_tse"),
                 presidentEvolution(official, null, System.currentTimeMillis()))
-            if (soundOnUpdate) OfficialUpdateSound.playForFreshData(this, preferences)
+            if (soundOnUpdate && !victoryEvent) OfficialUpdateSound.playForFreshData(this, preferences)
         }
     }
 
@@ -1253,6 +1380,9 @@ private fun ElectionApp() {
     var urnaSoundEnabled by remember {
         mutableStateOf(prefs.getBoolean(OfficialUpdateSound.PREF_ENABLED, false))
     }
+    var victorySoundEnabled by remember {
+        mutableStateOf(prefs.getBoolean(PresidentialVictoryAudio.PREF_ENABLED, true))
+    }
     var notificationError by remember { mutableStateOf(false) }
     // A ação "Encerrar" é disparada pelo serviço fora da tela Compose.
     // Escutar a mesma preferência sincroniza imediatamente o Switch, mesmo com
@@ -1363,6 +1493,7 @@ private fun ElectionApp() {
             var updated = reports
             val edit = prefs.edit()
             var soundOnUpdate = false
+            var victoryEvent = false
             var successful = 0
             val failures = mutableSetOf<String>()
             var throttled = false
@@ -1374,6 +1505,8 @@ private fun ElectionApp() {
                             ?: prefs.getString("tse_json_${answer.region}", null)
                                 ?.let { parseTseReport(it, answer.region) }
                         if (newPresidentialTally(previous, answer.report)) soundOnUpdate = true
+                        if (answer.region == "BR" && PresidentialVictoryAudio.onNewOfficialReport(
+                                context, prefs, previous, answer.report)) victoryEvent = true
                         updated = updated + (answer.region to answer.report)
                         edit.putString("tse_json_${answer.region}", answer.json)
                         if (answer.etag != null) edit.putString("tse_etag_${answer.region}", answer.etag)
@@ -1404,7 +1537,7 @@ private fun ElectionApp() {
             }
             edit.apply()
             reports = updated
-            if (soundOnUpdate) OfficialUpdateSound.playForFreshData(context, prefs)
+            if (soundOnUpdate && !victoryEvent) OfficialUpdateSound.playForFreshData(context, prefs)
             refreshProjectionNotification(context)
             unavailable = failures + retryAfter.keys.filter { System.currentTimeMillis() < (retryAfter[it] ?: 0L) }
             loading = false
@@ -1586,6 +1719,14 @@ private fun ElectionApp() {
                     prefs.edit().putBoolean(OfficialUpdateSound.PREF_ENABLED, enabled).apply()
                 },
                 onPreviewSound = { OfficialUpdateSound.preview(context) },
+                victorySoundEnabled = victorySoundEnabled,
+                onVictorySoundEnabledChange = { enabled ->
+                    victorySoundEnabled = enabled
+                    prefs.edit().putBoolean(PresidentialVictoryAudio.PREF_ENABLED, enabled).apply()
+                },
+                onPreviewVictorySound = { candidate ->
+                    PresidentialVictoryAudio.preview(context, candidate)
+                },
                 notificationError = notificationError,
                 status = if (electionMode == "governador") {
                     when {
@@ -1951,6 +2092,9 @@ private fun ElectionOptionsSheet(
     soundAvailable: Boolean,
     onSoundEnabledChange: (Boolean) -> Unit,
     onPreviewSound: () -> String,
+    victorySoundEnabled: Boolean,
+    onVictorySoundEnabledChange: (Boolean) -> Unit,
+    onPreviewVictorySound: (Int) -> String,
     notificationError: Boolean,
     status: String,
     onDismiss: () -> Unit,
@@ -2162,6 +2306,30 @@ private fun ElectionOptionsSheet(
                     ) { Text("▶ Ouvir som de teste", fontSize = 12.sp) }
                     if (soundTestMessage.isNotBlank()) {
                         Text(soundTestMessage, fontSize = 11.sp, color = Secundario)
+                    }
+                    HorizontalDivider(color = Borda)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text("Som de vitória presidencial", color = Tinta,
+                                fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                            Text("Uma vez por eleição, somente quando a vantagem oficial for irreversível",
+                                fontSize = captionSize, color = Secundario)
+                        }
+                        Switch(checked = victorySoundEnabled,
+                            onCheckedChange = onVictorySoundEnabledChange,
+                            colors = SwitchDefaults.colors(checkedTrackColor = Azul))
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = {
+                            soundTestMessage = onPreviewVictorySound(22)
+                        }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
+                            Text("▶ Testar Flávio", fontSize = 11.sp)
+                        }
+                        OutlinedButton(onClick = {
+                            soundTestMessage = onPreviewVictorySound(13)
+                        }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
+                            Text("▶ Testar Lula", fontSize = 11.sp)
+                        }
                     }
                     if (notificationError) {
                         Text("Autorize as notificações nas configurações do Android.",
@@ -3006,6 +3174,27 @@ private fun OfficialDashboard(
                         onPortraitClick = { onEasterEgg(13) }, portraitOverride = R.drawable.candidato_lula)
                 }
                 RatioBar(validOfficial.candidate22.toDouble(), validOfficial.candidate13.toDouble(), thickness = 14)
+                mathematicalVictory(validOfficial)?.let { decision ->
+                    val winnerName = if (decision.candidateNumber == 22) candidateA else candidateB
+                    val winnerColor = if (decision.candidateNumber == 22) Verde else Vermelho
+                    Surface(
+                        color = winnerColor.copy(alpha = 0.13f),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, winnerColor.copy(alpha = 0.55f))
+                    ) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                            Text("🏆 $winnerName — matematicamente eleito",
+                                color = Tinta, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text(
+                                if (decision.complete) "100% das seções totalizadas nos dados oficiais."
+                                else "A vantagem em votos oficiais supera o limite máximo possível de votos restantes.",
+                                color = Secundario, fontSize = 11.sp
+                            )
+                            Text("Conclusão matemática calculada pelo aplicativo, não declaração oficial do TSE.",
+                                color = Secundario, fontSize = 11.sp)
+                        }
+                    }
+                }
                 SummaryLine("Votos válidos contabilizados", count(validOfficial.validVotes.toDouble()))
                 SummaryLine("Brancos / nulos", "${count(validOfficial.blank.toDouble())} / ${count(validOfficial.nullVotes.toDouble())}")
                 Text("Arquivo TSE: ${validOfficial.generated}", fontSize = 11.sp, color = Secundario)
