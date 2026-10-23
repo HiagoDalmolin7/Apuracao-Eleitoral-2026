@@ -1722,6 +1722,8 @@ private fun ElectionApp() {
 
 
 // Estrutura compartilhada dos menus: a altura EXTERNA permanece fixa.
+// O fundo do painel alcança o rodapé edge-to-edge; os controles internos usam
+// navigationBarsPadding, sem aplicar novamente o inset no ModalBottomSheet.
 // Apenas o painel interno cresce/recolhe, impedindo o reancoramento que causava
 // vibração quando a folha chegava ao topo e o usuário deslizava de volta.
 @Composable
@@ -1811,6 +1813,14 @@ private fun ElectionOptionsSheet(
         modifier = Modifier.onSizeChanged { onSheetHeight(it.height.toFloat()) },
         shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp),
         containerColor = Color.Transparent,
+        // Modal edge-to-edge: não reservar uma segunda faixa para a barra de gestos.
+        // O painel interno já desenha até a borda inferior da janela.
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+        contentColor = panel.text,
+        properties = ModalBottomSheetProperties(
+            isAppearanceLightStatusBars = !darkMode,
+            isAppearanceLightNavigationBars = !darkMode
+        ),
         // Scrim próprio da tela principal com opacidade progressiva.
         scrimColor = Color.Transparent,
         dragHandle = null
@@ -1822,8 +1832,10 @@ private fun ElectionOptionsSheet(
             onTapOutsidePanel = onDismiss
         ) {
             Column(
+                // A cor do painel continua por trás da barra de gestos;
+                // apenas os controles respeitam o espaço seguro inferior.
                 modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp)
-                    .padding(bottom = 20.dp),
+                    .navigationBarsPadding().padding(bottom = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
             // Arraste só pela alça/cabeçalho; a lista rola livremente, sem conflito.
@@ -2154,6 +2166,14 @@ private fun RegionPickerPill(
             onDismissRequest = { dismissPicker() },
             shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp),
             containerColor = Color.Transparent,
+            // Mesma política do menu Opções: nenhum inset duplicado na base.
+            // A cor de palette.sheet é desenhada atrás do indicador de gestos.
+            contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+            contentColor = palette.text,
+            properties = ModalBottomSheetProperties(
+                isAppearanceLightStatusBars = palette == LightPalette,
+                isAppearanceLightNavigationBars = palette == LightPalette
+            ),
             scrimColor = Color.Black.copy(alpha = 0.25f),
             dragHandle = null
         ) {
@@ -2163,7 +2183,9 @@ private fun RegionPickerPill(
                 panelColor = palette.sheet,
                 onTapOutsidePanel = { dismissPicker() }
             ) {
-                Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
+                // Lista termina acima da barrinha do sistema, sem deixar fundo transparente.
+                Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)
+                    .navigationBarsPadding()) {
                 Box(Modifier.fillMaxWidth().then(pickerDragGesture)
                         .padding(top = 12.dp, bottom = 10.dp),
                     contentAlignment = Alignment.Center) {
