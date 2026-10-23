@@ -1,0 +1,6 @@
+Validação local (23/10/2026)
+- 13 cenários matemáticos executados usando o compilador Kotlin JVM 1.9.0 disponível no ambiente.
+- 13 PASS / 0 FAIL.
+- Testes importados do arquivo real ElectionMathTest.kt; pequena adaptação local das APIs do JUnit apenas para executar no host sem Android SDK.
+- Código de produção testado: ElectionMath.kt, que também é chamado pelo MainActivity.kt.
+- A validação com JUnit 4.13.2 / Kotlin 2.4.21 / Gradle 9.8.2 / Android Lint depende do GitHub Actions, ainda não executado.
