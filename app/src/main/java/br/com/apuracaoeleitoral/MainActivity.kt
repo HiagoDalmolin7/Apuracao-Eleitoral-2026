@@ -193,6 +193,10 @@ private data class TseReport(
     val sectionsDone: Long,
     val sectionsTotal: Long,
     val electorate: Long,
+    val electorateCounted: Long,
+    val totalBallots: Long,
+    val officialValidVotes: Long,
+    val technicalNullVotes: Long,
     val turnout: Long,
     val abstentions: Long,
     val blank: Long,
@@ -249,6 +253,10 @@ private fun parseTseReport(json: String, region: String): TseReport? = runCatchi
         sectionsDone = done,
         sectionsTotal = total,
         electorate = voters.longField("te"),
+        electorateCounted = voters.longField("est"),
+        totalBallots = ballots.longField("tv"),
+        officialValidVotes = ballots.longField("vv"),
+        technicalNullVotes = ballots.longField("vnt"),
         turnout = voters.longField("c"),
         abstentions = voters.longField("a"),
         blank = ballots.longField("vb"),
@@ -946,6 +954,74 @@ private fun RatioBar(a: Double, b: Double, modifier: Modifier = Modifier, thickn
 }
 
 
+// Sempre usa a abrangência nacional BR do EA20 para os totais oficiais.
+// Esse agregado já inclui as UFs e o exterior: nunca somar ZZ outra vez.
+// O eleitorado total existe antes da apuração; demais métricas podem começar zeradas.
+@Composable
+private fun NationalTotalsCard(national: TseReport?) {
+    SurfaceCard {
+        Text("Brasil • totais oficiais do TSE", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        if (national == null) {
+            Text(
+                "Aguardando arquivo nacional oficial (BR). Os valores ainda não estão disponíveis.",
+                color = Secundario, fontSize = 13.sp
+            )
+        } else {
+            SummaryLine("Eleitorado nacional", count(national.electorate.toDouble()))
+            SummaryLine("Seções eleitorais", count(national.sectionsTotal.toDouble()))
+            SummaryLine(
+                "Seções totalizadas",
+                "${count(national.sectionsDone.toDouble())} / ${count(national.sectionsTotal.toDouble())}"
+            )
+            SummaryLine("Progresso da apuração", percentage(national.sectionsPercent))
+            if (national.sectionsDone > 0L) {
+                HorizontalDivider(color = Borda)
+                SummaryLine("Eleitores totalizados", count(national.electorateCounted.toDouble()))
+                if (national.electorate > 0L) {
+                    SummaryLine(
+                        "Eleitorado ainda não totalizado",
+                        count((national.electorate - national.electorateCounted).coerceAtLeast(0L).toDouble())
+                    )
+                }
+                SummaryLine("Comparecimento contabilizado", count(national.turnout.toDouble()))
+                SummaryLine("Abstenções contabilizadas", count(national.abstentions.toDouble()))
+                if (national.electorateCounted > 0L) {
+                    SummaryLine(
+                        "Comparecimento nas seções totalizadas",
+                        percentage(100.0 * national.turnout / national.electorateCounted)
+                    )
+                    SummaryLine(
+                        "Abstenção nas seções totalizadas",
+                        percentage(100.0 * national.abstentions / national.electorateCounted)
+                    )
+                }
+                HorizontalDivider(color = Borda)
+                SummaryLine("Total de votos contabilizados", count(national.totalBallots.toDouble()))
+                SummaryLine("Votos válidos (TSE)", count(national.officialValidVotes.toDouble()))
+                SummaryLine("Votos em branco", count(national.blank.toDouble()))
+                SummaryLine("Votos nulos", count(national.nullVotes.toDouble()))
+                if (national.technicalNullVotes > 0L) {
+                    SummaryLine("Votos nulos técnicos", count(national.technicalNullVotes.toDouble()))
+                }
+            } else {
+                Text(
+                    "Aguardando início da totalização: comparecimento, abstenções e votos " +
+                        "ainda não foram contabilizados.",
+                    color = Secundario, fontSize = 12.sp
+                )
+            }
+            Text(
+                "Fonte: TSE, arquivo nacional BR (inclui o exterior). " +
+                    "Comparecimento e abstenções são parciais enquanto a apuração não termina.",
+                color = Secundario, fontSize = 11.sp
+            )
+            if (national.generated.isNotBlank()) {
+                Text("Dados TSE: ${national.generated}", color = Secundario, fontSize = 11.sp)
+            }
+        }
+    }
+}
+
 @Composable
 private fun OfficialDashboard(
     modifier: Modifier,
@@ -986,6 +1062,7 @@ private fun OfficialDashboard(
                 Text("Arquivo TSE: ${validOfficial.generated}", fontSize = 11.sp, color = Secundario)
             }
         }
+        NationalTotalsCard(national)
         SurfaceCard {
             Text("Projeção proporcional", fontSize = 19.sp, fontWeight = FontWeight.Bold)
             Text("Abrangência: $projectedLabel", color = Secundario, fontSize = 12.sp)
@@ -1175,24 +1252,10 @@ private fun OfficialStatistics(
 ) {
     val regionsWithVotes = (UFS + "ZZ").count { sources[it]?.hasVotes == true }
     val projectedRows = projected.values.filter { it.valid }
-    val base = national?.takeIf { it.hasVotes }
     ContentColumn(modifier) {
         Text("Estatísticas", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text(status, fontSize = 12.sp, color = Secundario)
-        SurfaceCard {
-            Text("Brasil • números oficiais", fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            if (base != null) {
-                SummaryLine("Eleitorado nacional", count(base.electorate.toDouble()))
-                SummaryLine("Seções totalizadas", "${count(base.sectionsDone.toDouble())} / ${count(base.sectionsTotal.toDouble())}")
-                SummaryLine("Apuração", percentage(base.sectionsPercent))
-                SummaryLine("Comparecimento", count(base.turnout.toDouble()))
-                SummaryLine("Abstenções", count(base.abstentions.toDouble()))
-                SummaryLine("Votos válidos dos candidatos", count(base.validVotes.toDouble()))
-                SummaryLine("Brancos", count(base.blank.toDouble()))
-                SummaryLine("Nulos", count(base.nullVotes.toDouble()))
-                Text("TSE: ${base.generated}", fontSize = 11.sp, color = Secundario)
-            } else Text("Aguardando os primeiros votos nacionais divulgados pelo TSE.", color = Secundario)
-        }
+        NationalTotalsCard(national)
         SurfaceCard {
             Text("Exterior • resultado oficial", fontSize = 17.sp, fontWeight = FontWeight.Bold)
             if (exterior?.hasVotes == true) {
