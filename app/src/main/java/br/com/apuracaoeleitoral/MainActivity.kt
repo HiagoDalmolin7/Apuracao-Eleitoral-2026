@@ -332,6 +332,132 @@ private fun fetchTseRegion(prefs: SharedPreferences, region: String): DownloadRe
     }
 }
 
+// === Segundo turno estadual, independente da eleição presidencial ===
+// Fonte: TSE EA20. Presidente: 6258/cargo 1; governador: 6260/cargo 3.
+// Os seis segundos turnos estaduais foram divulgados pelo TSE em 14/10/2026.
+private val GOVERNOR_UFS = listOf("AC", "AM", "DF", "ES", "RN", "TO")
+private val GOVERNOR_BLUE = Color(0xFF245AA6)
+private val GOVERNOR_PURPLE = Color(0xFF9055A2)
+
+private data class GovernorCandidate(
+    val number: String,
+    val name: String,
+    val party: String,
+    val votes: Long
+)
+
+private data class GovernorReport(
+    val uf: String,
+    val candidates: List<GovernorCandidate>,
+    val sectionsDone: Long,
+    val sectionsTotal: Long,
+    val electorate: Long,
+    val turnout: Long,
+    val abstentions: Long,
+    val blank: Long,
+    val nullVotes: Long,
+    val officialValidVotes: Long,
+    val generated: String
+) {
+    val sectionsPercent: Double get() = if (sectionsTotal > 0L) 100.0 * sectionsDone / sectionsTotal else 0.0
+    val hasVotes: Boolean get() = sectionsDone > 0L && candidates.sumOf { it.votes } > 0L
+    val validVotes: Long get() = candidates.sumOf { it.votes }
+    val projected: List<Double> get() = candidates.map { c ->
+        if (!hasVotes || sectionsPercent <= 0) 0.0 else c.votes * 100.0 / sectionsPercent
+    }
+}
+
+private fun governorUrl(uf: String): String {
+    val code = uf.lowercase(Locale.ROOT)
+    return "https://resultados.tse.jus.br/oficial/ele2026/6260/dados/$code/$code-c0003-e006260-u.json"
+}
+
+private fun parseGovernorReport(raw: String, uf: String): GovernorReport? = runCatching {
+    val root = JSONObject(raw)
+    require(root.optString("ele") == "6260" && root.optString("t") == "2")
+    require(root.optString("cdabr").equals(uf, ignoreCase = true))
+    val offices = root.getJSONArray("carg")
+    val governor = (0 until offices.length()).map { offices.getJSONObject(it) }
+        .first { it.optString("cd").toIntOrNull() == 3 }
+    val parties = governor.getJSONArray("agr")
+    val candidates = mutableListOf<GovernorCandidate>()
+    for (i in 0 until parties.length()) {
+        val alliance = parties.getJSONObject(i)
+        val memberParties = alliance.optJSONArray("par") ?: continue
+        for (j in 0 until memberParties.length()) {
+            val party = memberParties.getJSONObject(j)
+            val nominations = party.optJSONArray("cand") ?: continue
+            for (k in 0 until nominations.length()) {
+                val c = nominations.getJSONObject(k)
+                val number = c.optString("n")
+                if (number.isNotBlank()) candidates.add(GovernorCandidate(
+                    number = number,
+                    name = c.optString("nmu").ifBlank { c.optString("nm") },
+                    party = party.optString("sg"),
+                    votes = c.longField("vap")
+                ))
+            }
+        }
+    }
+    // Nunca associar candidatos pela ordem dos blocos ou nomes fictícios.
+    require(candidates.size == 2 && candidates.map { it.number }.distinct().size == 2)
+    val s = root.getJSONObject("s")
+    val e = root.getJSONObject("e")
+    val v = root.getJSONObject("v")
+    val sectionsTotal = s.longField("ts")
+    val sectionsDone = s.longField("st")
+    require(sectionsTotal > 0L && sectionsDone in 0..sectionsTotal)
+    val totalValid = candidates.sumOf { it.votes }
+    require(totalValid <= v.longField("tv") || v.longField("tv") == 0L)
+    GovernorReport(
+        uf, candidates.sortedBy { it.number.toIntOrNull() ?: Int.MAX_VALUE },
+        sectionsDone, sectionsTotal, e.longField("te"), e.longField("c"),
+        e.longField("a"), v.longField("vb"), v.longField("vn"),
+        v.longField("vv"),
+        listOf(root.optString("dg"), root.optString("hg"))
+            .filter { it.isNotBlank() }.joinToString(" às ")
+    )
+}.getOrNull()
+
+private data class GovernorDownload(
+    val uf: String,
+    val report: GovernorReport? = null,
+    val json: String? = null,
+    val notModified: Boolean = false,
+    val status: Int = 0,
+    val etag: String? = null,
+    val modified: String? = null
+)
+
+private fun fetchGovernor(prefs: SharedPreferences, uf: String): GovernorDownload {
+    var connection: HttpURLConnection? = null
+    try {
+        connection = (URL(governorUrl(uf)).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 8_000
+            readTimeout = 8_000
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("User-Agent", "ApuracaoEleitoral2026-Android/3.0")
+            if (prefs.contains("tse_gov_json_$uf")) {
+                prefs.getString("tse_gov_etag_$uf", null)?.let { setRequestProperty("If-None-Match", it) }
+                prefs.getString("tse_gov_modified_$uf", null)?.let { setRequestProperty("If-Modified-Since", it) }
+            }
+        }
+        val code = connection.responseCode
+        if (code == HttpURLConnection.HTTP_NOT_MODIFIED) return GovernorDownload(uf, notModified = true)
+        if (code != HttpURLConnection.HTTP_OK) return GovernorDownload(uf, status = code)
+        val text = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        val report = parseGovernorReport(text, uf)
+            ?: return GovernorDownload(uf, status = -2) // não substituir cache em caso de mudança de formato
+        return GovernorDownload(uf, report, text,
+            etag = connection.getHeaderField("ETag"), modified = connection.getHeaderField("Last-Modified"))
+    } catch (_: Exception) {
+        return GovernorDownload(uf, status = -1)
+    } finally {
+        connection?.disconnect()
+    }
+}
+
 private fun clockTime(whenMs: Long): String = if (whenMs <= 0L) "—"
     else SimpleDateFormat("dd/MM HH:mm:ss", PtBr).format(Date(whenMs))
 
@@ -363,6 +489,22 @@ private fun ElectionApp() {
     var lastGood by remember { mutableLongStateOf(prefs.getLong("tse_last_ok", 0L)) }
     var unavailable by remember { mutableStateOf(emptySet<String>()) }
     var needsRetry by remember { mutableIntStateOf(0) }
+    // Eleição selecionada e UF de governador têm estado próprio: não misturam resultado presidencial.
+    var electionMode by remember { mutableStateOf(prefs.getString("eleicao_2026", "presidente") ?: "presidente") }
+    var selectedGovernorUF by remember {
+        mutableStateOf(prefs.getString("governador_uf_2026", "AC")?.takeIf { it in GOVERNOR_UFS } ?: "AC")
+    }
+    var governorReports by remember {
+        mutableStateOf(GOVERNOR_UFS.mapNotNull { uf ->
+            prefs.getString("tse_gov_json_$uf", null)?.let { text ->
+                parseGovernorReport(text, uf)?.let { report -> uf to report }
+            }
+        }.toMap())
+    }
+    var governorLoading by remember { mutableStateOf(false) }
+    var governorLastGood by remember { mutableLongStateOf(prefs.getLong("tse_gov_last_ok", 0L)) }
+    var governorFailed by remember { mutableStateOf(emptySet<String>()) }
+    var governorRetry by remember { mutableIntStateOf(0) }
     var selectedUF by remember { mutableStateOf("SC") }
     var tab by remember { mutableIntStateOf(0) }
     // O modo manual utiliza as mesmas chaves da versão original (uf_SC, uf_GO...).
@@ -380,8 +522,8 @@ private fun ElectionApp() {
 
     // Atualiza a cada 60 segundos enquanto o aplicativo está aberto em primeiro plano.
     // Pausa automaticamente quando a atividade deixa de estar visível.
-    LaunchedEffect(needsRetry, manualMode) {
-        if (manualMode) {
+    LaunchedEffect(needsRetry, manualMode, electionMode) {
+        if (manualMode || electionMode != "presidente") {
             // Sem requisições ao TSE neste modo; a coleta é cancelada ao mudar o interruptor.
             loading = false
             return@LaunchedEffect
@@ -449,6 +591,70 @@ private fun ElectionApp() {
         }
     }
 
+    // A eleição estadual possui seu próprio endpoint, cache e rotina de consulta.
+    // Apenas uma rotina (Presidência ou Governador) faz requisições por vez.
+    LaunchedEffect(governorRetry, electionMode) {
+        if (electionMode != "governador") {
+            governorLoading = false
+            return@LaunchedEffect
+        }
+        val semaphore = Semaphore(2)
+        val retryAfter = mutableMapOf<String, Long>()
+        while (isActive) {
+            if (!activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                delay(1_500L)
+                continue
+            }
+            val due = GOVERNOR_UFS.filter { System.currentTimeMillis() >= (retryAfter[it] ?: 0L) }
+            if (due.isEmpty()) { delay(TSE_INTERVAL_MS); continue }
+            governorLoading = true
+            val fresh = withContext(Dispatchers.IO) {
+                coroutineScope {
+                    due.map { uf -> async { semaphore.withPermit { fetchGovernor(prefs, uf) } } }.awaitAll()
+                }
+            }
+            var revised = governorReports
+            var success = false
+            val bad = mutableSetOf<String>()
+            val changes = prefs.edit()
+            var throttled = false
+            for (answer in fresh) {
+                when {
+                    answer.report != null && answer.json != null -> {
+                        revised = revised + (answer.uf to answer.report)
+                        changes.putString("tse_gov_json_${answer.uf}", answer.json)
+                        answer.etag?.let { changes.putString("tse_gov_etag_${answer.uf}", it) }
+                        answer.modified?.let { changes.putString("tse_gov_modified_${answer.uf}", it) }
+                        retryAfter.remove(answer.uf)
+                        success = true
+                    }
+                    answer.notModified && revised.containsKey(answer.uf) -> {
+                        retryAfter.remove(answer.uf)
+                        success = true
+                    }
+                    else -> {
+                        bad.add(answer.uf)
+                        if (answer.status == 403 || answer.status == 429) {
+                            retryAfter[answer.uf] = System.currentTimeMillis() + 300_000L
+                            throttled = true
+                        } else if (answer.status == 404) {
+                            retryAfter[answer.uf] = System.currentTimeMillis() + 240_000L
+                        }
+                    }
+                }
+            }
+            governorReports = revised
+            if (success) {
+                governorLastGood = System.currentTimeMillis()
+                changes.putLong("tse_gov_last_ok", governorLastGood)
+            }
+            changes.apply()
+            governorFailed = bad + retryAfter.keys.filter { System.currentTimeMillis() < (retryAfter[it] ?: 0L) }
+            governorLoading = false
+            delay(if (throttled) 300_000L else TSE_INTERVAL_MS)
+        }
+    }
+
     val officialStates = remember(reports) {
         (UFS + "ZZ").associateWith { region ->
             stateFromOfficial(reports[region]).let { if (it.uf.isBlank()) it.copy(uf = region) else it }
@@ -496,21 +702,40 @@ private fun ElectionApp() {
                             Column {
                                 Text("Apuração Eleitoral 2026", fontWeight = FontWeight.Bold, fontSize = 20.sp)
                                 Text(
-                                    if (manualMode) "Presidência • 2º turno • Manual" else "Presidência • 2º turno • TSE",
+                                    if (electionMode == "governador") "Governador • 2º turno • TSE"
+                                    else if (manualMode) "Presidência • 2º turno • Manual" else "Presidência • 2º turno • TSE",
                                     fontSize = 12.sp, color = Secundario
                                 )
                             }
                         },
                         actions = {
-                            if (!manualMode) {
-                                if (loading) CircularProgressIndicator(
+                            if (electionMode == "governador" || !manualMode) {
+                                if (if (electionMode == "governador") governorLoading else loading) CircularProgressIndicator(
                                     modifier = Modifier.padding(end = 13.dp).size(18.dp), strokeWidth = 2.dp
-                                ) else TextButton(onClick = { needsRetry++ }) { Text("Atualizar", fontSize = 12.sp) }
+                                ) else TextButton(onClick = {
+                                    if (electionMode == "governador") governorRetry++ else needsRetry++
+                                }) { Text("Atualizar", fontSize = 12.sp) }
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
                     )
-                    DataModeSwitch(
+                    ElectionChoice(
+                        selectedElection = electionMode,
+                        selectedGovernor = selectedGovernorUF,
+                        onPresident = {
+                            electionMode = "presidente"
+                            tab = 0
+                            prefs.edit().putString("eleicao_2026", electionMode).apply()
+                        },
+                        onGovernor = { uf ->
+                            electionMode = "governador"
+                            selectedGovernorUF = uf
+                            tab = 0
+                            prefs.edit().putString("eleicao_2026", electionMode)
+                                .putString("governador_uf_2026", selectedGovernorUF).apply()
+                        }
+                    )
+                    if (electionMode == "presidente") DataModeSwitch(
                         automatic = !manualMode,
                         onAutomaticChange = { enabled ->
                             manualMode = !enabled
@@ -534,7 +759,34 @@ private fun ElectionApp() {
                 }
             }
         ) { padding ->
-            if (manualMode) {
+            if (electionMode == "governador") {
+                val stateReport = governorReports[selectedGovernorUF]
+                val govStatus = when {
+                    governorLoading && governorLastGood == 0L -> "Conectando aos resultados estaduais do TSE..."
+                    governorLastGood == 0L -> "Aguardando arquivos oficiais estaduais do TSE"
+                    governorFailed.isNotEmpty() -> "Última sincronização: ${clockTime(governorLastGood)} • fontes indisponíveis: ${governorFailed.sorted().joinToString()}"
+                    else -> "Dados TSE: ${clockTime(governorLastGood)} • atualização a cada 60 s"
+                }
+                when (tab) {
+                    0 -> GovernorDashboard(
+                        Modifier.padding(padding), selectedGovernorUF, stateReport,
+                        governorReports, govStatus,
+                        onChoose = { uf -> selectedGovernorUF = uf; prefs.edit().putString("governador_uf_2026", uf).apply() },
+                        onDetails = { tab = 1 }
+                    )
+                    1 -> GovernorRegions(
+                        Modifier.padding(padding), selectedGovernorUF, governorReports,
+                        govStatus, governorFailed,
+                        onSelect = { uf -> selectedGovernorUF = uf; prefs.edit().putString("governador_uf_2026", uf).apply() }
+                    )
+                    2 -> GovernorMap(
+                        Modifier.padding(padding), selectedGovernorUF, governorReports,
+                        onSelect = { uf -> selectedGovernorUF = uf; prefs.edit().putString("governador_uf_2026", uf).apply() },
+                        onDetails = { tab = 1 }
+                    )
+                    else -> GovernorStatistics(Modifier.padding(padding), selectedGovernorUF, stateReport, govStatus)
+                }
+            } else if (manualMode) {
                 when (tab) {
                     0 -> ManualDashboard(
                         modifier = Modifier.padding(padding),
@@ -1284,6 +1536,278 @@ private fun OfficialStatistics(
     }
 }
 
+// === Seletor de eleições do segundo turno ===
+@Composable
+private fun ElectionChoice(
+    selectedElection: String,
+    selectedGovernor: String,
+    onPresident: () -> Unit,
+    onGovernor: (String) -> Unit
+) {
+    var open by remember { mutableStateOf(false) }
+    Surface(color = Color.White) {
+        Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+            OutlinedButton(
+                onClick = { open = true },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Eleição selecionada", color = Secundario, fontSize = 11.sp)
+                    Text(if (selectedElection == "governador") "Governador — $selectedGovernor" else "Presidente — Brasil",
+                        fontWeight = FontWeight.Bold, color = Tinta, fontSize = 14.sp)
+                }
+                Text("⌄", color = Azul, fontSize = 20.sp)
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                DropdownMenuItem(
+                    text = { Text("Presidente — Brasil", fontWeight = FontWeight.SemiBold) },
+                    onClick = { onPresident(); open = false }
+                )
+                HorizontalDivider()
+                GOVERNOR_UFS.forEach { uf ->
+                    DropdownMenuItem(
+                        text = { Text("Governador — $uf") },
+                        onClick = { onGovernor(uf); open = false }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GovernorCandidateRow(candidate: GovernorCandidate, total: Long, color: Color, projected: Double? = null) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Box(Modifier.size(10.dp).clip(CircleShape).background(color))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text("${candidate.name} (${candidate.number})", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(candidate.party, fontSize = 11.sp, color = Secundario)
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            Text(percentage(if (total > 0) candidate.votes * 100.0 / total else 0.0),
+                fontWeight = FontWeight.Bold, color = Tinta, fontSize = 17.sp)
+            Text(count(candidate.votes.toDouble()), color = Secundario, fontSize = 12.sp)
+            if (projected != null) Text("Projeção: ${count(projected)}", color = Secundario, fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun GovernorRatioBar(report: GovernorReport) {
+    val first = report.candidates.getOrNull(0)?.votes?.toDouble() ?: 0.0
+    val second = report.candidates.getOrNull(1)?.votes?.toDouble() ?: 0.0
+    val total = first + second
+    Row(Modifier.fillMaxWidth().height(12.dp).clip(RoundedCornerShape(99.dp))
+        .background(Color(0xFFE7EBF0)), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (total > 0.0) {
+            if (first > 0.0) Box(Modifier.weight((first / total).toFloat().coerceAtLeast(.0001f))
+                .fillMaxHeight().background(GOVERNOR_BLUE))
+            if (second > 0.0) Box(Modifier.weight((second / total).toFloat().coerceAtLeast(.0001f))
+                .fillMaxHeight().background(GOVERNOR_PURPLE))
+        }
+    }
+}
+
+@Composable
+private fun GovernorDetailCards(report: GovernorReport?) {
+    SurfaceCard {
+        Text("Resultado oficial apurado", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        if (report == null) {
+            Text("O arquivo oficial desta disputa ainda não está disponível. O app tentará novamente.",
+                color = Secundario, fontSize = 13.sp)
+        } else {
+            Text("${percentage(report.sectionsPercent)} das seções totalizadas", fontWeight = FontWeight.SemiBold)
+            LinearProgressIndicator(
+                progress = { (report.sectionsPercent / 100).toFloat().coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(99.dp)),
+                color = Azul, trackColor = Color(0xFFE8EDF4)
+            )
+            if (report.hasVotes) {
+                report.candidates.forEachIndexed { index, candidate ->
+                    GovernorCandidateRow(candidate, report.validVotes,
+                        if (index == 0) GOVERNOR_BLUE else GOVERNOR_PURPLE)
+                }
+                GovernorRatioBar(report)
+            } else {
+                Text("Candidaturas cadastradas; aguardando votos do TSE.", color = Secundario, fontSize = 13.sp)
+                report.candidates.forEach { c -> Text("${c.name} (${c.number}) — ${c.party}", fontSize = 13.sp) }
+            }
+            SummaryLine("Votos válidos apurados", count(report.validVotes.toDouble()))
+            Text("Arquivo oficial gerado em ${report.generated}", fontSize = 11.sp, color = Secundario)
+        }
+    }
+}
+
+@Composable
+private fun GovernorProjectionsCard(report: GovernorReport?) {
+    SurfaceCard {
+        Text("Projeção proporcional • Governador", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        if (report?.hasVotes == true) {
+            report.candidates.forEachIndexed { index, c ->
+                GovernorCandidateRow(c, report.validVotes,
+                    if (index == 0) GOVERNOR_BLUE else GOVERNOR_PURPLE,
+                    projected = report.projected[index])
+            }
+            SummaryLine("Votos válidos projetados", count(report.projected.sum()))
+            if (report.sectionsPercent < 100.0) Text(
+                "Estimativa: votos já recebidos ÷ percentual de seções apuradas nesta UF.",
+                color = Secundario, fontSize = 12.sp)
+        } else {
+            Text("Aguardando votos para calcular a projeção.", color = Secundario)
+        }
+        Text("Projeção independente do aplicativo, não é resultado oficial do TSE.",
+            fontSize = 12.sp, color = Secundario)
+    }
+}
+
+@Composable
+private fun GovernorTotalsCard(report: GovernorReport?) {
+    SurfaceCard {
+        Text("Estatísticas estaduais • TSE", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        if (report == null) {
+            Text("Totais oficiais ainda indisponíveis para esta UF.", color = Secundario)
+        } else {
+            SummaryLine("Eleitorado", count(report.electorate.toDouble()))
+            SummaryLine("Seções apuradas", "${count(report.sectionsDone.toDouble())} / ${count(report.sectionsTotal.toDouble())}")
+            if (report.sectionsDone > 0L) {
+                SummaryLine("Comparecimento contabilizado", count(report.turnout.toDouble()))
+                SummaryLine("Abstenções contabilizadas", count(report.abstentions.toDouble()))
+                SummaryLine("Votos válidos (TSE)", count(report.officialValidVotes.toDouble()))
+                SummaryLine("Brancos", count(report.blank.toDouble()))
+                SummaryLine("Nulos", count(report.nullVotes.toDouble()))
+            } else Text("Aguardando o início da totalização.", color = Secundario, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun GovernorDashboard(
+    modifier: Modifier, selected: String, report: GovernorReport?,
+    all: Map<String, GovernorReport>, status: String,
+    onChoose: (String) -> Unit, onDetails: () -> Unit
+) {
+    ContentColumn(modifier) {
+        Note("GOVERNADOR • 2º TURNO • Dados oficiais estaduais do TSE. Esta disputa não entra na totalização presidencial.")
+        Text(status, color = Secundario, fontSize = 12.sp)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically) {
+            Text("Governador — $selected", fontSize = 21.sp, fontWeight = FontWeight.Bold)
+            TextButton(onClick = onDetails) { Text("Detalhes") }
+        }
+        GovernorDetailCards(report)
+        GovernorProjectionsCard(report)
+        GovernorTotalsCard(report)
+        SurfaceCard {
+            Text("Outros estados com 2º turno", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            GOVERNOR_UFS.forEach { uf ->
+                Row(Modifier.fillMaxWidth().clickable { onChoose(uf) }.padding(vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Governador • $uf", fontWeight = FontWeight.SemiBold)
+                        val state = all[uf]
+                        Text(if (state?.hasVotes == true) "${percentage(state.sectionsPercent)} apurado"
+                            else if (state != null) "Aguardando votos" else "Aguardando arquivo do TSE",
+                            color = Secundario, fontSize = 12.sp)
+                    }
+                    Text(if (uf == selected) "Selecionado" else "Ver →", color = Azul, fontSize = 12.sp)
+                }
+                HorizontalDivider(color = Borda)
+            }
+        }
+    }
+}
+
+@Composable
+private fun GovernorRegions(
+    modifier: Modifier, selected: String, all: Map<String, GovernorReport>,
+    status: String, failed: Set<String>, onSelect: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val report = all[selected]
+    ContentColumn(modifier) {
+        Text("Governadores • 2º turno", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(status, fontSize = 12.sp, color = Secundario)
+        SurfaceCard {
+            Text("Estado ou Distrito Federal", fontWeight = FontWeight.SemiBold)
+            Box {
+                OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Governador — $selected", modifier = Modifier.weight(1f), textAlign = TextAlign.Start)
+                    Text("⌄")
+                }
+                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    GOVERNOR_UFS.forEach { uf ->
+                        DropdownMenuItem(text = { Text(uf) }, onClick = { onSelect(uf); expanded = false })
+                    }
+                }
+            }
+        }
+        GovernorDetailCards(report)
+        GovernorProjectionsCard(report)
+        GovernorTotalsCard(report)
+        if (selected in failed) Note("Falha temporária ao consultar $selected. O último arquivo válido continua salvo no celular.")
+    }
+}
+
+@Composable
+private fun GovernorMap(
+    modifier: Modifier, selected: String,
+    all: Map<String, GovernorReport>,
+    onSelect: (String) -> Unit, onDetails: () -> Unit
+) {
+    val geometry = remember { readBrazilMap() }
+    val colors = remember(all) {
+        UFS.associateWith { uf ->
+            val report = all[uf]
+            if (report?.hasVotes == true) Estimate(
+                a = report.candidates[0].votes.toDouble(),
+                b = report.candidates[1].votes.toDouble(),
+                urnas = report.sectionsPercent, valid = true
+            ) else Estimate()
+        }
+    }
+    val active = GOVERNOR_UFS.count { all[it]?.hasVotes == true }
+    ContentColumn(modifier) {
+        Text("Mapa • Governadores", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text("Somente estados com segundo turno de governador recebem cores. Toque em um deles.",
+            color = Secundario, fontSize = 12.sp)
+        SurfaceCard {
+            Text("$active / 6 estados com votos", fontSize = 13.sp, color = Secundario)
+            BrazilStateMap(geometry, colors, selected,
+                onSelected = { uf -> if (uf in GOVERNOR_UFS) onSelect(uf) },
+                colorA = GOVERNOR_BLUE, colorB = GOVERNOR_PURPLE)
+            Text("Azul e roxo representam o primeiro e o segundo candidato por número eleitoral em cada estado.",
+                fontSize = 12.sp, color = Secundario)
+            Text("Cinza = sem disputa estadual ou sem votos disponíveis.", fontSize = 12.sp, color = Secundario)
+        }
+        SurfaceCard {
+            Text("Governador • $selected", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+            val report = all[selected]
+            if (report != null) {
+                Text("${percentage(report.sectionsPercent)} das seções totalizadas", fontSize = 13.sp)
+                report.candidates.forEachIndexed { index, c ->
+                    GovernorCandidateRow(c, report.validVotes,
+                        if (index == 0) GOVERNOR_BLUE else GOVERNOR_PURPLE)
+                }
+                if (report.hasVotes) GovernorRatioBar(report)
+            } else Text("Aguardando dados oficiais desta UF.", color = Secundario)
+            Button(onClick = onDetails, modifier = Modifier.fillMaxWidth()) { Text("Ver detalhes de $selected") }
+        }
+    }
+}
+
+@Composable
+private fun GovernorStatistics(modifier: Modifier, selected: String, report: GovernorReport?, status: String) {
+    ContentColumn(modifier) {
+        Text("Estatísticas • Governador", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text("$selected • $status", fontSize = 12.sp, color = Secundario)
+        GovernorTotalsCard(report)
+        GovernorProjectionsCard(report)
+        Note("Cada disputa de governador usa os números e os candidatos do próprio estado. Não somamos votos de governadores entre estados nem aos votos de Presidente.")
+    }
+}
+
 @Composable
 private fun SummaryLine(label: String, value: String) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
@@ -1349,11 +1873,10 @@ private fun insidePolygon(point: Offset, polygon: List<Offset>): Boolean {
     return inside
 }
 
-private fun mapColor(result: Estimate): Color {
+private fun mapColor(result: Estimate, first: Color = Verde, second: Color = Vermelho): Color {
     if (!result.valid || result.validos <= 0) return Color(0xFFE2E7ED)
-    // A proporção é entre os dois candidatos no próprio estado.
     val shareA = (result.a / result.validos).toFloat().coerceIn(0f, 1f)
-    return lerp(Vermelho, Verde, shareA)
+    return lerp(second, first, shareA)
 }
 
 @Composable
@@ -1361,7 +1884,9 @@ private fun BrazilStateMap(
     geometry: List<UfOutline>,
     estimates: Map<String, Estimate>,
     selected: String,
-    onSelected: (String) -> Unit
+    onSelected: (String) -> Unit,
+    colorA: Color = Verde,
+    colorB: Color = Vermelho
 ) {
     Canvas(
         modifier = Modifier.fillMaxWidth().aspectRatio(1f)
@@ -1393,7 +1918,7 @@ private fun BrazilStateMap(
                 if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
             path.close()
-            drawPath(path, color = mapColor(estimates.getValue(state.uf)))
+            drawPath(path, color = mapColor(estimates.getValue(state.uf), colorA, colorB))
             drawPath(
                 path,
                 color = if (selected == state.uf) Azul else Color.White,
