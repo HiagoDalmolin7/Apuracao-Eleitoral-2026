@@ -42,11 +42,20 @@ import java.util.zip.GZIPInputStream
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.view.WindowCompat
-import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -78,6 +87,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.sp
 import org.json.JSONObject
 import org.json.JSONArray
@@ -578,6 +588,9 @@ class MainActivity : ComponentActivity() {
                 prefs.edit().putBoolean("notificacao_projecao_ativa", false).apply()
             }
         }
+        // Conteúdo edge-to-edge: o app ocupa toda a janela e controla seus próprios insets.
+        // Mantemos os indicadores do Android visíveis e contrastantes sobre fundo claro.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent { ElectionApp() }
         // Ícones escuros sobre a barra de status clara, inclusive no modo edge-to-edge.
         applySystemBarContrast()
@@ -591,8 +604,11 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightNavigationBars = true
         }
         // Em APIs anteriores à transparência obrigatória, manter o fundo da barra branco.
-        if (Build.VERSION.SDK_INT < 35) {
-            window.statusBarColor = android.graphics.Color.WHITE
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= 29) {
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
         }
     }
 
@@ -868,6 +884,67 @@ private fun ElectionApp() {
     var selectedUF by remember { mutableStateOf("SC") }
     var tab by remember { mutableIntStateOf(0) }
     var showOptions by remember { mutableStateOf(false) }
+    // A barra de ferramentas e a navegação inferior acompanham o dedo, sem consumir a rolagem.
+    // O usuário puxa para cima para recolhê-las e para baixo para reaparecerem.
+    val density = LocalDensity.current
+    val statusInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val topChromeHeight = statusInset + 64.dp
+    val bottomChromeHeight = navInset + 76.dp
+    val scrollDistancePx = with(density) { 104.dp.toPx() }
+    var chromeVisible by remember { mutableFloatStateOf(1f) }
+    val chromeNestedScroll = remember(scrollDistancePx, showOptions) {
+        object : NestedScrollConnection {
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource
+            ): Offset {
+                // Ao chegar ao início da página, o gesto para baixo também devolve as barras.
+                val gestureY = if (consumed.y != 0f) consumed.y else available.y.coerceAtLeast(0f)
+                if (!showOptions && source == NestedScrollSource.UserInput && abs(gestureY) > 0.5f) {
+                    chromeVisible = (chromeVisible + gestureY / scrollDistancePx).coerceIn(0f, 1f)
+                }
+                return Offset.Zero
+            }
+
+            // Ao soltar o dedo, completa a transição com uma animação curta.
+            // Durante o gesto, a posição continua vinculada diretamente à rolagem.
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                if (!showOptions && chromeVisible > 0.01f && chromeVisible < 0.99f) {
+                    val destination = if (chromeVisible >= 0.52f) 1f else 0f
+                    animate(
+                        initialValue = chromeVisible,
+                        targetValue = destination,
+                        animationSpec = tween(durationMillis = 170)
+                    ) { value, _ -> chromeVisible = value }
+                }
+                return Velocity.Zero
+            }
+        }
+    }
+    LaunchedEffect(tab, electionMode) { chromeVisible = 1f }
+    // O blur segue a posição real da folha modal, inclusive quando arrastada para fechar.
+    val optionsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val sheetScope = rememberCoroutineScope()
+    var sheetHeightPx by remember { mutableFloatStateOf(0f) }
+    val screenHeightPx = with(density) { LocalConfiguration.current.screenHeightDp.dp.toPx() }
+    val sheetReveal by remember(showOptions, optionsSheetState, sheetHeightPx, screenHeightPx) {
+        derivedStateOf {
+            if (!showOptions || sheetHeightPx <= 1f) 0f
+            else {
+                val y = runCatching { optionsSheetState.requireOffset() }.getOrNull()
+                if (y == null || !y.isFinite()) 0f
+                else ((screenHeightPx - y) / sheetHeightPx).coerceIn(0f, 1f)
+            }
+        }
+    }
+    fun dismissOptions() {
+        sheetScope.launch {
+            if (optionsSheetState.isVisible) optionsSheetState.hide()
+            showOptions = false
+        }
+    }
     // O modo manual utiliza as mesmas chaves da versão original (uf_SC, uf_GO...).
     // Os arquivos oficiais ficam SOMENTE em tse_json_*, sem sobrescrever a digitação.
     var manualMode by remember { mutableStateOf(prefs.getBoolean("modo_manual", false)) }
@@ -1135,6 +1212,8 @@ private fun ElectionApp() {
     ) {
         if (showOptions) {
             ElectionOptionsSheet(
+                sheetState = optionsSheetState,
+                onSheetHeight = { sheetHeightPx = it },
                 electionMode = electionMode,
                 selectedGovernor = selectedGovernorUF,
                 automatic = !manualMode,
@@ -1147,7 +1226,7 @@ private fun ElectionApp() {
                         else -> "Aguardando dados oficiais do TSE"
                     }
                 } else status,
-                onDismiss = { showOptions = false },
+                onDismiss = { dismissOptions() },
                 onPresident = {
                     electionMode = "presidente"
                     tab = 0
@@ -1171,25 +1250,29 @@ private fun ElectionApp() {
                 onRefresh = {
                     if (electionMode == "governador") governorRetry++
                     else if (!manualMode) needsRetry++
-                    showOptions = false
+                    dismissOptions()
                 }
             )
         }
-        // Desfoque sutil SOMENTE ao abrir o painel de opções.
-        // O painel é uma janela modal independente e continua completamente nítido.
-        val menuBackgroundBlur by animateDpAsState(
-            targetValue = if (showOptions && Build.VERSION.SDK_INT >= 31) 7.dp else 0.dp,
-            animationSpec = tween(durationMillis = 220),
-            label = "Desfoque do menu"
-        )
+        // A intensidade não depende de um booleano: segue o deslocamento da folha,
+        // acompanhando também o gesto de fechamento, sem saltos bruscos.
+        val menuBackgroundBlur = if (Build.VERSION.SDK_INT >= 31) (sheetReveal * 8f).dp else 0.dp
         Scaffold(
-            modifier = Modifier.fillMaxSize().blur(menuBackgroundBlur),
+            modifier = Modifier.fillMaxSize()
+                .nestedScroll(chromeNestedScroll)
+                .blur(menuBackgroundBlur),
             containerColor = Fundo,
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
             topBar = {
-                // Header compacto: todas as configurações foram movidas para um menu modal.
-                // A área superior respeita o recorte da câmera e a barra de status do Android.
-                Column(Modifier.fillMaxWidth().statusBarsPadding()) {
-                    TopAppBar(
+                // Barra totalmente recolhível, inclusive a área reservada para o status bar.
+                // O texto desliza junto com o dedo. A tela fica edge-to-edge.
+                Box(Modifier.fillMaxWidth().height(topChromeHeight * chromeVisible).clipToBounds()) {
+                    Column(Modifier.fillMaxWidth().requiredHeight(topChromeHeight).graphicsLayer {
+                        translationY = -(1f - chromeVisible) * with(density) { 64.dp.toPx() }
+                        alpha = chromeVisible
+                    }) {
+                        Spacer(Modifier.height(statusInset))
+                        TopAppBar(
                         windowInsets = WindowInsets(0, 0, 0, 0),
                         title = {
                             Column(
@@ -1207,7 +1290,6 @@ private fun ElectionApp() {
                                         else "Presidente • Brasil • TSE",
                                         fontSize = 11.sp, color = Secundario, maxLines = 1
                                     )
-                                    Text("  ⌄", fontSize = 14.sp, color = Azul)
                                 }
                             }
                         },
@@ -1231,7 +1313,7 @@ private fun ElectionApp() {
                             }
                             IconButton(
                                 onClick = { showOptions = true },
-                                modifier = Modifier.padding(end = 7.dp)
+                                modifier = Modifier.size(48.dp)
                                     .semantics { contentDescription = "Abrir menu de opções" }
                             ) {
                                 Box(
@@ -1239,30 +1321,73 @@ private fun ElectionApp() {
                                         .background(Color(0xFFF0F3F8)),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text("⋮", fontSize = 25.sp, color = Tinta, lineHeight = 28.sp)
+                                    // Três círculos vetoriais centrados geometricamente,
+                                    // sem depender do alinhamento da fonte do caractere ⋮.
+                                    Canvas(Modifier.size(20.dp)) {
+                                        val cx = size.width / 2f
+                                        val cy = size.height / 2f
+                                        val radius = size.width * 0.065f
+                                        for (n in -1..1) {
+                                            drawCircle(Tinta, radius, Offset(cx, cy + n * size.height * 0.27f))
+                                        }
+                                    }
                                 }
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
-                    )
-                    HorizontalDivider(color = Borda, thickness = 0.8.dp)
+                        )
+                        HorizontalDivider(color = Borda, thickness = 0.8.dp)
+                    }
                 }
             },
             bottomBar = {
-                Surface(color = Color.White, shadowElevation = 8.dp) {
-                    Row(
+                Box(Modifier.fillMaxWidth().height(bottomChromeHeight * chromeVisible).clipToBounds()) {
+                    Surface(
+                        modifier = Modifier.align(Alignment.BottomCenter)
+                            .requiredHeight(bottomChromeHeight).graphicsLayer {
+                            translationY = (1f - chromeVisible) * with(density) { 72.dp.toPx() }
+                            alpha = chromeVisible
+                        },
+                        color = Color.White, shadowElevation = 8.dp
+                    ) {
+                        Row(
                         modifier = Modifier.fillMaxWidth().navigationBarsPadding()
                             .padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         listOf("Painel", "Estados", "Mapa", "Gráfico", "Estat.").forEachIndexed { index, label ->
-                            BottomTab(label, index, tab == index, { tab = index }, Modifier.weight(1f))
+                            BottomTab(label, index, tab == index, {
+                                tab = index
+                                chromeVisible = 1f
+                            }, Modifier.weight(1f))
+                        }
                         }
                     }
                 }
             }
         ) { padding ->
+            // Dissolução discreta do conteúdo nas extremidades. Conforme as barras
+            // recolhem, o efeito aumenta e mantém os ícones do sistema legíveis.
+            Box(Modifier.fillMaxSize().drawWithContent {
+                drawContent()
+                val opacity = (1f - chromeVisible) * 0.93f
+                if (opacity > 0.01f) {
+                    val edge = 42.dp.toPx()
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(Fundo.copy(alpha = opacity), Fundo.copy(alpha = 0f)),
+                            startY = 0f, endY = edge
+                        )
+                    )
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(Fundo.copy(alpha = 0f), Fundo.copy(alpha = opacity)),
+                            startY = (size.height - edge).coerceAtLeast(0f), endY = size.height
+                        )
+                    )
+                }
+            }) {
             if (electionMode == "governador") {
                 val stateReport = governorReports[selectedGovernorUF]
                 val govStatus = when {
@@ -1384,6 +1509,7 @@ private fun ElectionApp() {
                     )
                 }
             }
+            } // Área de conteúdo edge-to-edge com fade nas bordas
         }
     }
 }
@@ -1393,6 +1519,8 @@ private fun ElectionApp() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ElectionOptionsSheet(
+    sheetState: SheetState,
+    onSheetHeight: (Float) -> Unit,
     electionMode: String,
     selectedGovernor: String,
     automatic: Boolean,
@@ -1407,11 +1535,13 @@ private fun ElectionOptionsSheet(
     onRefresh: () -> Unit
 ) {
     ModalBottomSheet(
+        sheetState = sheetState,
         onDismissRequest = onDismiss,
+        modifier = Modifier.onSizeChanged { onSheetHeight(it.height.toFloat()) },
         shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
         containerColor = Color(0xFFF7F9FC),
-        // A camada semitransparente reforça a profundidade sem escurecer demais os dados.
-        scrimColor = Color(0xFF172235).copy(alpha = 0.17f),
+        // O scrim acompanha a transição do BottomSheet; o blur usa o mesmo offset.
+        scrimColor = Color(0xFF172235).copy(alpha = 0.12f),
         dragHandle = { BottomSheetDefaults.DragHandle() }
     ) {
         Column(
