@@ -201,6 +201,9 @@ private val DarkPalette = AppPalette(
 )
 
 private val LocalAppPalette = androidx.compose.runtime.staticCompositionLocalOf { LightPalette }
+// Margem fixa inicial do conteúdo, DENTRO da área rolável: não muda com os gestos.
+// A barra superior é apenas uma sobreposição, sem alterar o Scaffold.
+private val LocalScrollableTopInset = androidx.compose.runtime.staticCompositionLocalOf { 92.dp }
 
 private val Fundo: Color @Composable get() = LocalAppPalette.current.background
 private val Tinta: Color @Composable get() = LocalAppPalette.current.text
@@ -1342,52 +1345,76 @@ private fun ElectionApp() {
             isAppearanceLightNavigationBars = !darkMode
         }
     }
-    // A barra de ferramentas e a navegação inferior acompanham o dedo, sem consumir a rolagem.
-    // O usuário puxa para cima para recolhê-las e para baixo para reaparecerem.
+    // Ambas as barras são overlays fixos e NUNCA entram nas medidas do Scaffold.
+    // O progresso acompanha o delta real do dedo (sem animação atrasada durante o gesto).
+    // Ao soltar, somente a fração restante é animada até ficar 100% visível/oculta.
     val density = LocalDensity.current
     val statusInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val topChromeHeight = statusInset + 64.dp
     val bottomChromeHeight = navInset + 84.dp
-    // A pílula tem destinos fixos (totalmente visível ou oculta), mas percorre
-    // a transição com suavidade. Não anima dentro da corrotina de fling cancelável.
-    var chromeTargetVisible by remember { mutableStateOf(true) }
-    val chromeVisible by animateFloatAsState(
-        targetValue = if (chromeTargetVisible) 1f else 0f,
-        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
-        label = "Recolher barra flutuante suavemente"
-    )
-    val gestureThresholdPx = with(density) { 12.dp.toPx() }
-    val chromeNestedScroll = remember(showOptions, gestureThresholdPx) {
+    val chromeTravelPx = with(density) { 94.dp.toPx() }
+    val chromeScope = rememberCoroutineScope()
+    var chromeVisible by remember { mutableFloatStateOf(1f) }
+    // Controle compartilhado permite cancelar também quando muda de aba ou abre o menu.
+    val chromeSettleJob = remember { arrayOfNulls<Job>(1) }
+    val chromeNestedScroll = remember(showOptions, chromeTravelPx, chromeScope) {
         object : NestedScrollConnection {
-            private var accumulatedY = 0f
+            private var lastGestureDirection = -1f
+            private var flingStarted = false
 
-            private fun onMovement(dy: Float, force: Boolean = false) {
-                if (showOptions || kotlin.math.abs(dy) < 0.5f) return
-                // Ignorar os pequenos rebotes que acontecem durante um fling.
-                if (accumulatedY * dy < 0f) accumulatedY = 0f
-                accumulatedY = (accumulatedY + dy)
-                    .coerceIn(-gestureThresholdPx * 2f, gestureThresholdPx * 2f)
-                if (force || kotlin.math.abs(accumulatedY) >= gestureThresholdPx) {
-                    chromeTargetVisible = accumulatedY > 0f
-                    accumulatedY = 0f
+            private fun settle(velocity: Float?) {
+                if (showOptions) return
+                val direction = if (velocity != null && kotlin.math.abs(velocity) > 180f)
+                    velocity else lastGestureDirection
+                val target = if (direction > 0f) 1f else 0f
+                chromeSettleJob[0]?.cancel()
+                chromeSettleJob[0] = chromeScope.launch {
+                    // Sem mudar alturas ou padding: só posição e opacidade das barras.
+                    androidx.compose.animation.core.animate(
+                        initialValue = chromeVisible,
+                        targetValue = target,
+                        animationSpec = tween(durationMillis = 150, easing = FastOutSlowInEasing)
+                    ) { value, _ -> chromeVisible = value }
                 }
             }
 
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.UserInput) onMovement(available.y)
-                return Offset.Zero // A rolagem continua livre para a página.
+                if (source != NestedScrollSource.UserInput || showOptions) return Offset.Zero
+                val dy = available.y
+                if (kotlin.math.abs(dy) < 0.01f) return Offset.Zero
+                // Interromper a animação anterior no mesmo instante em que começa novo gesto.
+                chromeSettleJob[0]?.cancel()
+                chromeSettleJob[0] = null
+                flingStarted = false
+                // Um rebote de 1 pixel não pode inverter o sentido do gesto.
+                if (kotlin.math.abs(dy) >= 1.2f) {
+                    lastGestureDirection = if (dy > 0f) 1f else -1f
+                }
+                chromeVisible = (chromeVisible + dy / chromeTravelPx).coerceIn(0f, 1f)
+                return Offset.Zero // não consumir o gesto: o conteúdo rola normalmente
             }
 
             override suspend fun onPreFling(available: Velocity): Velocity {
-                // Finalizar o gesto rápido no destino completo, independente
-                // da distância percorrida ou do encerramento da animação de fling.
-                if (kotlin.math.abs(available.y) > 60f) onMovement(available.y, force = true)
+                if (!showOptions) {
+                    flingStarted = true
+                    settle(available.y)
+                }
+                return Velocity.Zero // não interferir no fling do conteúdo
+            }
+
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                if (!showOptions && !flingStarted) settle(null)
+                flingStarted = false
                 return Velocity.Zero
             }
         }
     }
-    LaunchedEffect(tab, electionMode) { chromeTargetVisible = true }
+    LaunchedEffect(tab, electionMode, showOptions) {
+        chromeSettleJob[0]?.cancel()
+        chromeSettleJob[0] = null
+        chromeVisible = 1f
+    }
     // O blur segue a posição real da folha modal, inclusive quando arrastada para fechar.
     // Efeito vidro nativo: o conteúdo por trás da pílula vira fonte de blur.
     val dockHazeState = rememberHazeState()
@@ -1777,7 +1804,10 @@ private fun ElectionApp() {
             outline = palette.border
         ), typography = Typography()
     ) {
-        CompositionLocalProvider(LocalAppPalette provides palette) {
+        CompositionLocalProvider(
+            LocalAppPalette provides palette,
+            LocalScrollableTopInset provides topChromeHeight
+        ) {
         if (showOptions) {
             ElectionOptionsSheet(
                 sheetState = optionsSheetState,
@@ -1871,59 +1901,7 @@ private fun ElectionApp() {
                 .blur(menuBackgroundBlur),
             containerColor = Fundo,
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
-            topBar = {
-                // Barra totalmente recolhível, inclusive a área reservada para o status bar.
-                // O texto desliza junto com o dedo. A tela fica edge-to-edge.
-                Box(Modifier.fillMaxWidth().height(topChromeHeight * chromeVisible).clipToBounds()) {
-                    Column(Modifier.fillMaxWidth().requiredHeight(topChromeHeight).graphicsLayer {
-                        translationY = -(1f - chromeVisible) * with(density) { 64.dp.toPx() }
-                        alpha = chromeVisible
-                    }) {
-                        Spacer(Modifier.height(statusInset))
-                        TopAppBar(
-                        windowInsets = WindowInsets(0, 0, 0, 0),
-                        title = {
-                            Column(
-                                modifier = Modifier.padding(vertical = 3.dp),
-                                verticalArrangement = Arrangement.spacedBy(2.dp)
-                            ) {
-                                Text("Apuração Eleitoral 2026", fontWeight = FontWeight.Bold,
-                                    fontSize = 18.sp, color = Tinta, maxLines = 1)
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        if (electionMode == "governador") "Governador • $selectedGovernorUF • TSE"
-                                        else if (manualMode) "Presidente • Brasil • Manual"
-                                        else "Presidente • Brasil • TSE",
-                                        fontSize = 11.sp, color = Secundario, maxLines = 1
-                                    )
-                                }
-                            }
-                        },
-                        actions = {
-                            if (electionMode == "governador" || !manualMode) {
-                                if (if (electionMode == "governador") governorLoading else loading) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.padding(horizontal = 10.dp).size(18.dp),
-                                        strokeWidth = 2.dp, color = Azul
-                                    )
-                                } else {
-                                    IconButton(
-                                        onClick = {
-                                            if (electionMode == "governador") governorRetry++ else needsRetry++
-                                        },
-                                        modifier = Modifier.semantics { contentDescription = "Atualizar resultados agora" }
-                                    ) {
-                                        Text("↻", fontSize = 26.sp, color = Azul)
-                                    }
-                                }
-                            }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
-                        )
-                        HorizontalDivider(color = Borda, thickness = 0.8.dp)
-                    }
-                }
-            },
+            topBar = {}, // top bar is an overlay in the content Box (no layout resize)
             bottomBar = {}
         ) { padding ->
             // Dissolução discreta do conteúdo nas extremidades. Conforme as barras
@@ -2088,37 +2066,90 @@ private fun ElectionApp() {
             }
             } // AnimatedContent
             } // Conteúdo com fade nas bordas
-            // Quando chromeVisible chega a 0, a altura externa fica 0dp.
+            // CABEÇALHO FLUTUANTE: mede sempre a mesma altura e não desloca o conteúdo.
+            Box(
+                Modifier.align(Alignment.TopCenter).fillMaxWidth()
+                    .height(topChromeHeight)
+                    .graphicsLayer {
+                        translationY = -(1f - chromeVisible) * with(density) { topChromeHeight.toPx() }
+                        alpha = chromeVisible
+                    }
+            ) {
+                Column(Modifier.fillMaxSize()
+                    .background(MaterialTheme.colorScheme.surface)) {
+                        Spacer(Modifier.height(statusInset))
+                        TopAppBar(
+                        windowInsets = WindowInsets(0, 0, 0, 0),
+                        title = {
+                            Column(
+                                modifier = Modifier.padding(vertical = 3.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text("Apuração Eleitoral 2026", fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp, color = Tinta, maxLines = 1)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        if (electionMode == "governador") "Governador • $selectedGovernorUF • TSE"
+                                        else if (manualMode) "Presidente • Brasil • Manual"
+                                        else "Presidente • Brasil • TSE",
+                                        fontSize = 11.sp, color = Secundario, maxLines = 1
+                                    )
+                                }
+                            }
+                        },
+                        actions = {
+                            if (electionMode == "governador" || !manualMode) {
+                                if (if (electionMode == "governador") governorLoading else loading) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.padding(horizontal = 10.dp).size(18.dp),
+                                        strokeWidth = 2.dp, color = Azul
+                                    )
+                                } else {
+                                    IconButton(
+                                        onClick = {
+                                            if (electionMode == "governador") governorRetry++ else needsRetry++
+                                        },
+                                        modifier = Modifier.semantics { contentDescription = "Atualizar resultados agora" }
+                                    ) {
+                                        Text("↻", fontSize = 26.sp, color = Azul)
+                                    }
+                                }
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+                        )
+                        HorizontalDivider(color = Borda, thickness = 0.8.dp)
+                }
+            }
+            // PÍLULA FLUTUANTE: altura fixa. Só transforma o próprio desenho.
+            // Ao chegar a 0f fica inteiramente fora da tela sem recortar nem reacomodar o fundo.
             // A pílula inteira (inclusive sombra/blur) sai da área visível; sem meia barra.
             // O destino do gesto é definido mesmo durante flings muito rápidos.
             Box(
                 Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                    .height(bottomChromeHeight * chromeVisible).clipToBounds()
+                    .height(bottomChromeHeight)
+                    .graphicsLayer {
+                        translationY = (1f - chromeVisible) * with(density) { bottomChromeHeight.toPx() }
+                        alpha = chromeVisible
+                    }
             ) {
-                Box(
-                    Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                        .requiredHeight(bottomChromeHeight)
-                        .graphicsLayer {
-                            translationY = (1f - chromeVisible) * with(density) { 78.dp.toPx() }
-                            alpha = chromeVisible
-                        }
-                ) {
-                    GlassNavigationPill(
-                        selected = tab,
-                        onTabSelected = { next ->
-                            if (tab != next) tab = next
-                            chromeTargetVisible = true
-                        },
-                        onSettings = {
-                            chromeTargetVisible = true
-                            showOptions = true
-                        },
-                        modifier = Modifier.align(Alignment.BottomCenter)
-                            .fillMaxWidth()
-                            .padding(start = 15.dp, end = 15.dp, bottom = navInset + 8.dp),
-                        hazeState = dockHazeState
-                    )
-                }
+                GlassNavigationPill(
+                    selected = tab,
+                    onTabSelected = { next ->
+                        chromeSettleJob[0]?.cancel()
+                        if (tab != next) tab = next
+                        chromeVisible = 1f
+                    },
+                    onSettings = {
+                        chromeSettleJob[0]?.cancel()
+                        chromeVisible = 1f
+                        showOptions = true
+                    },
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(start = 15.dp, end = 15.dp, bottom = navInset + 8.dp),
+                    hazeState = dockHazeState
+                )
             }
             } // Área de conteúdo e dock
 
@@ -3218,7 +3249,8 @@ private fun BottomTabSymbol(index: Int, tint: Color) {
 private fun ContentColumn(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Column(
         modifier.fillMaxSize().verticalScroll(rememberScrollState())
-            .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 102.dp),
+            .padding(start = 16.dp, end = 16.dp,
+                top = LocalScrollableTopInset.current + 16.dp, bottom = 102.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
         content = content
     )
