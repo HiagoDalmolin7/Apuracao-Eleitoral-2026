@@ -1,6 +1,12 @@
 package br.com.apuracaoeleitoral
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.MediaPlayer
 import android.os.Build
 import android.Manifest
 import android.app.Service
@@ -313,6 +319,90 @@ private fun StateData.asJson(): String = JSONObject()
 private val TSE_LOCATIONS = UFS + listOf("ZZ", "BR")
 private const val TSE_BASE = "https://resultados.tse.jus.br/oficial/ele2026/6258/dados"
 private const val TSE_INTERVAL_MS = 60_000L
+
+// Alertas locais para novas seções/votos oficialmente contabilizados.
+// O MP3 é OPCIONAL durante a compilação: quando adicionado a res/raw/som_urna.mp3,
+// ele será encontrado automaticamente. O modo manual nunca dispara sons.
+private object OfficialUpdateSound {
+    const val PREF_ENABLED = "som_urna_ativo_2026"
+    private const val LAST_PLAYED = "som_urna_ultimo_toque_2026"
+    private const val MIN_INTERVAL_MS = 35_000L // 1 som para muitos estados atualizados juntos
+    private val handler = Handler(Looper.getMainLooper())
+    private val lock = Any()
+    private var activePlayer: MediaPlayer? = null
+
+    fun hasFile(context: Context): Boolean = context.resources.getIdentifier(
+        "som_urna", "raw", context.packageName
+    ) != 0
+
+    private fun mayPlay(context: Context): Boolean {
+        val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        // Segue o modo silencioso/vibração e o volume de notificações.
+        return audio.ringerMode == AudioManager.RINGER_MODE_NORMAL &&
+            audio.getStreamVolume(AudioManager.STREAM_NOTIFICATION) > 0
+    }
+
+    fun playForFreshData(context: Context, prefs: SharedPreferences) {
+        if (!prefs.getBoolean(PREF_ENABLED, false) || !hasFile(context) || !mayPlay(context)) return
+        val now = SystemClock.elapsedRealtime()
+        synchronized(lock) {
+            val last = prefs.getLong(LAST_PLAYED, -1L)
+            if (last >= 0L && now >= last && now - last < MIN_INTERVAL_MS) return
+            prefs.edit().putLong(LAST_PLAYED, now).apply()
+        }
+        handler.post { play(context.applicationContext) }
+    }
+
+    fun preview(context: Context): String {
+        if (!hasFile(context)) return "Adicione o arquivo res/raw/som_urna.mp3 para testar."
+        if (!mayPlay(context)) return "Desative o modo silencioso/vibração e aumente o volume de notificações."
+        handler.post { play(context.applicationContext) }
+        return "Reprodução de teste solicitada."
+    }
+
+    private fun play(context: Context) {
+        if (!mayPlay(context)) return
+        val resource = context.resources.getIdentifier("som_urna", "raw", context.packageName)
+        if (resource == 0) return
+        try {
+            activePlayer?.release()
+            activePlayer = null
+            val attributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION_EVENT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+            val player = MediaPlayer.create(context, resource, attributes, 0) ?: return
+            activePlayer = player
+            player.setOnCompletionListener { mp ->
+                if (activePlayer === mp) activePlayer = null
+                mp.release()
+            }
+            player.setOnErrorListener { mp, _, _ ->
+                if (activePlayer === mp) activePlayer = null
+                mp.release()
+                true
+            }
+            player.start()
+        } catch (_: Exception) {
+            activePlayer?.runCatching { release() }
+            activePlayer = null
+        }
+    }
+}
+
+// Mudança efetiva de apuração (votos/seções), não só timestamp, ETag ou HTTP 200.
+private fun newPresidentialTally(before: TseReport?, after: TseReport): Boolean =
+    after.hasVotes && (before == null ||
+        after.sectionsDone > before.sectionsDone ||
+        after.candidate22 != before.candidate22 ||
+        after.candidate13 != before.candidate13 ||
+        after.blank != before.blank || after.nullVotes != before.nullVotes)
+
+private fun newGovernorTally(before: GovernorReport?, after: GovernorReport): Boolean =
+    after.hasVotes && (before == null ||
+        after.sectionsDone > before.sectionsDone ||
+        after.candidates.map { it.number to it.votes } != before.candidates.map { it.number to it.votes } ||
+        after.blank != before.blank || after.nullVotes != before.nullVotes)
 
 private data class TseReport(
     val location: String,
@@ -830,10 +920,14 @@ class ProjectionNotificationService : Service() {
             if (System.currentTimeMillis() < (backoffUntil[id] ?: 0L)) return
             val result = fetchGovernor(preferences, uf)
             if (result.report != null && result.json != null) {
+                val previous = preferences.getString("tse_gov_json_$uf", null)
+                    ?.let { parseGovernorReport(it, uf) }
+                val freshTally = newGovernorTally(previous, result.report)
                 preferences.edit().putString("tse_gov_json_$uf", result.json)
                     .putLong("tse_gov_last_ok", System.currentTimeMillis()).apply()
                 val old = readEvolution(preferences, id)
                 addEvolution(preferences, id, old, governorEvolution(result.report, System.currentTimeMillis()))
+                if (freshTally) OfficialUpdateSound.playForFreshData(this, preferences)
             } else if (result.status == 404 || result.status == 403 || result.status == 429) {
                 backoffUntil[id] = System.currentTimeMillis() + 300_000L
             }
@@ -850,8 +944,12 @@ class ProjectionNotificationService : Service() {
             regions.map { uf -> async { semaphore.withPermit { fetchTseRegion(preferences, uf) } } }.awaitAll()
         }
         var newData = false
+        var soundOnUpdate = false
         results.forEach { result ->
             if (result.report != null && result.json != null) {
+                val previous = preferences.getString("tse_json_${result.region}", null)
+                    ?.let { parseTseReport(it, result.region) }
+                if (newPresidentialTally(previous, result.report)) soundOnUpdate = true
                 val editor = preferences.edit().putString("tse_json_${result.region}", result.json)
                 result.etag?.let { editor.putString("tse_etag_${result.region}", it) }
                 result.lastModified?.let { editor.putString("tse_modified_${result.region}", it) }
@@ -871,6 +969,7 @@ class ProjectionNotificationService : Service() {
             }.toMap()
             addEvolution(preferences, "presidente_tse", readEvolution(preferences, "presidente_tse"),
                 presidentEvolution(official, null, System.currentTimeMillis()))
+            if (soundOnUpdate) OfficialUpdateSound.playForFreshData(this, preferences)
         }
     }
 
@@ -1103,6 +1202,9 @@ private fun ElectionApp() {
     // Os arquivos oficiais ficam SOMENTE em tse_json_*, sem sobrescrever a digitação.
     var manualMode by remember { mutableStateOf(prefs.getBoolean("modo_manual", false)) }
     var notificationOn by remember { mutableStateOf(prefs.getBoolean("notificacao_projecao_ativa", false)) }
+    var urnaSoundEnabled by remember {
+        mutableStateOf(prefs.getBoolean(OfficialUpdateSound.PREF_ENABLED, false))
+    }
     var notificationError by remember { mutableStateOf(false) }
     // A ação "Encerrar" é disparada pelo serviço fora da tela Compose.
     // Escutar a mesma preferência sincroniza imediatamente o Switch, mesmo com
@@ -1212,6 +1314,7 @@ private fun ElectionApp() {
             }
             var updated = reports
             val edit = prefs.edit()
+            var soundOnUpdate = false
             var successful = 0
             val failures = mutableSetOf<String>()
             var throttled = false
@@ -1219,6 +1322,10 @@ private fun ElectionApp() {
                 when {
                     answer.report != null && answer.json != null -> {
                         // Somente arquivos oficialmente válidos sobrescrevem o último registro.
+                        val previous = updated[answer.region]
+                            ?: prefs.getString("tse_json_${answer.region}", null)
+                                ?.let { parseTseReport(it, answer.region) }
+                        if (newPresidentialTally(previous, answer.report)) soundOnUpdate = true
                         updated = updated + (answer.region to answer.report)
                         edit.putString("tse_json_${answer.region}", answer.json)
                         if (answer.etag != null) edit.putString("tse_etag_${answer.region}", answer.etag)
@@ -1249,6 +1356,7 @@ private fun ElectionApp() {
             }
             edit.apply()
             reports = updated
+            if (soundOnUpdate) OfficialUpdateSound.playForFreshData(context, prefs)
             refreshProjectionNotification(context)
             unavailable = failures + retryAfter.keys.filter { System.currentTimeMillis() < (retryAfter[it] ?: 0L) }
             loading = false
@@ -1280,6 +1388,7 @@ private fun ElectionApp() {
                 }
             }
             var revised = governorReports
+            var soundOnUpdate = false
             var success = false
             val bad = mutableSetOf<String>()
             val changes = prefs.edit()
@@ -1287,6 +1396,10 @@ private fun ElectionApp() {
             for (answer in fresh) {
                 when {
                     answer.report != null && answer.json != null -> {
+                        val previous = revised[answer.uf]
+                            ?: prefs.getString("tse_gov_json_${answer.uf}", null)
+                                ?.let { parseGovernorReport(it, answer.uf) }
+                        if (newGovernorTally(previous, answer.report)) soundOnUpdate = true
                         revised = revised + (answer.uf to answer.report)
                         changes.putString("tse_gov_json_${answer.uf}", answer.json)
                         answer.etag?.let { changes.putString("tse_gov_etag_${answer.uf}", it) }
@@ -1310,6 +1423,7 @@ private fun ElectionApp() {
                 }
             }
             governorReports = revised
+            if (soundOnUpdate) OfficialUpdateSound.playForFreshData(context, prefs)
             refreshProjectionNotification(context)
             if (success) {
                 governorLastGood = System.currentTimeMillis()
@@ -1417,6 +1531,13 @@ private fun ElectionApp() {
                     prefs.edit().putBoolean("tema_escuro_2026", enabled).apply()
                 },
                 notificationEnabled = notificationOn,
+                soundEnabled = urnaSoundEnabled,
+                soundAvailable = OfficialUpdateSound.hasFile(context),
+                onSoundEnabledChange = { enabled ->
+                    urnaSoundEnabled = enabled
+                    prefs.edit().putBoolean(OfficialUpdateSound.PREF_ENABLED, enabled).apply()
+                },
+                onPreviewSound = { OfficialUpdateSound.preview(context) },
                 notificationError = notificationError,
                 status = if (electionMode == "governador") {
                     when {
@@ -1776,6 +1897,10 @@ private fun ElectionOptionsSheet(
     darkMode: Boolean,
     onDarkModeChange: (Boolean) -> Unit,
     notificationEnabled: Boolean,
+    soundEnabled: Boolean,
+    soundAvailable: Boolean,
+    onSoundEnabledChange: (Boolean) -> Unit,
+    onPreviewSound: () -> String,
     notificationError: Boolean,
     status: String,
     onDismiss: () -> Unit,
@@ -1790,6 +1915,7 @@ private fun ElectionOptionsSheet(
     val isGovernor = electionMode == "governador"
     var showGovernorList by remember(isGovernor) { mutableStateOf(isGovernor) }
     var showSourceInfo by remember { mutableStateOf(false) }
+    var soundTestMessage by remember { mutableStateOf("") }
     var refreshRequested by remember { mutableStateOf(false) }
     LaunchedEffect(status) { refreshRequested = false }
     val panel = LocalAppPalette.current
@@ -1964,6 +2090,28 @@ private fun ElectionOptionsSheet(
                         }
                         Switch(checked = notificationEnabled, onCheckedChange = onNotificationChange,
                             colors = SwitchDefaults.colors(checkedTrackColor = Azul))
+                    }
+                    HorizontalDivider(color = Borda)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text("Som da urna nas atualizações", color = Tinta,
+                                fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                            Text("Toca apenas quando novos votos ou seções chegam do TSE",
+                                fontSize = captionSize, color = Secundario)
+                        }
+                        Switch(checked = soundEnabled, onCheckedChange = onSoundEnabledChange,
+                            colors = SwitchDefaults.colors(checkedTrackColor = Azul))
+                    }
+                    if (!soundAvailable) {
+                        Text("Arquivo som_urna.mp3 ainda não incluído no aplicativo.",
+                            fontSize = 11.sp, color = Aviso)
+                    }
+                    OutlinedButton(
+                        onClick = { soundTestMessage = onPreviewSound() },
+                        modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)
+                    ) { Text("▶ Ouvir som de teste", fontSize = 12.sp) }
+                    if (soundTestMessage.isNotBlank()) {
+                        Text(soundTestMessage, fontSize = 11.sp, color = Secundario)
                     }
                     if (notificationError) {
                         Text("Autorize as notificações nas configurações do Android.",
