@@ -41,6 +41,9 @@ import java.io.ByteArrayInputStream
 import java.util.zip.GZIPInputStream
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.core.view.WindowCompat
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -57,6 +60,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
@@ -575,6 +579,26 @@ class MainActivity : ComponentActivity() {
             }
         }
         setContent { ElectionApp() }
+        // Ícones escuros sobre a barra de status clara, inclusive no modo edge-to-edge.
+        applySystemBarContrast()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applySystemBarContrast() {
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            // No Android, "LightStatusBars" significa FUNDO claro, com ícones escuros.
+            isAppearanceLightStatusBars = true
+            isAppearanceLightNavigationBars = true
+        }
+        // Em APIs anteriores à transparência obrigatória, manter o fundo da barra branco.
+        if (Build.VERSION.SDK_INT < 35) {
+            window.statusBarColor = android.graphics.Color.WHITE
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        applySystemBarContrast()
     }
 
     override fun onStart() {
@@ -1151,7 +1175,15 @@ private fun ElectionApp() {
                 }
             )
         }
+        // Desfoque sutil SOMENTE ao abrir o painel de opções.
+        // O painel é uma janela modal independente e continua completamente nítido.
+        val menuBackgroundBlur by animateDpAsState(
+            targetValue = if (showOptions && Build.VERSION.SDK_INT >= 31) 7.dp else 0.dp,
+            animationSpec = tween(durationMillis = 220),
+            label = "Desfoque do menu"
+        )
         Scaffold(
+            modifier = Modifier.fillMaxSize().blur(menuBackgroundBlur),
             containerColor = Fundo,
             topBar = {
                 // Header compacto: todas as configurações foram movidas para um menu modal.
@@ -1378,6 +1410,8 @@ private fun ElectionOptionsSheet(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
         containerColor = Color(0xFFF7F9FC),
+        // A camada semitransparente reforça a profundidade sem escurecer demais os dados.
+        scrimColor = Color(0xFF172235).copy(alpha = 0.17f),
         dragHandle = { BottomSheetDefaults.DragHandle() }
     ) {
         Column(
