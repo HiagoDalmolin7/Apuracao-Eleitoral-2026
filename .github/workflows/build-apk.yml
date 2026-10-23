@@ -2,6 +2,8 @@ name: Gerar APK Android
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -9,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-
+    timeout-minutes: 35
     steps:
       - name: Baixar projeto
         uses: actions/checkout@v7
@@ -20,12 +22,27 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Preparar Android SDK
+      - name: Configurar Android SDK
         uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '15859902'
 
-      - name: Instalar Android SDK 37.2
+      - name: Instalar plataforma Android 37.2
+        shell: bash
         run: |
-          sdkmanager --install "platforms;android-37.2" "build-tools;36.0.0"
+          set -euo pipefail
+          # Android CLI é o substituto do sdkmanager. Em imagens sem ele,
+          # mantém-se o método confiável anterior como fallback.
+          ANDROID_CLI="$(command -v android || true)"
+          if [[ -z "$ANDROID_CLI" ]]; then
+            ANDROID_CLI="$(find "$ANDROID_HOME/cmdline-tools" -type f -path '*/bin/android' -print -quit 2>/dev/null || true)"
+          fi
+          if [[ -n "$ANDROID_CLI" ]] && "$ANDROID_CLI" sdk install platforms/android-37.2 build-tools/36.0.0; then
+            echo "SDK instalado via Android CLI."
+          else
+            echo "Android CLI indisponível/incompatível neste runner; usando sdkmanager."
+            sdkmanager --install "platforms;android-37.2" "build-tools;36.0.0"
+          fi
           test -f "$ANDROID_HOME/platforms/android-37.2/android.jar"
 
       - name: Configurar Gradle 9.8.2
@@ -33,18 +50,46 @@ jobs:
         with:
           gradle-version: '9.8.2'
 
-      - name: Gerar APK
-        run: gradle :app:assembleDebug --no-daemon
+      - name: Testes unitários Kotlin
+        run: gradle :app:testDebugUnitTest --no-daemon --configuration-cache --warning-mode all
 
-      - name: Renomear APK
+      - name: Android Lint (erros bloqueiam o build)
+        run: gradle :app:lintDebug --no-daemon --configuration-cache --warning-mode all
+
+      - name: Gerar APK Debug
+        run: gradle :app:assembleDebug --no-daemon --configuration-cache --warning-mode all
+
+      - name: Verificar reutilização do Configuration Cache
+        run: gradle :app:assembleDebug --no-daemon --configuration-cache --warning-mode all
+
+      - name: Anexar relatórios de qualidade
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Relatorios-Testes-Lint-Gradle
+          if-no-files-found: ignore
+          path: |
+            app/build/reports/tests/**
+            app/build/test-results/**
+            app/build/reports/lint-results-*.html
+            app/build/reports/lint-results-*.xml
+            build/reports/problems/**
+            build/reports/configuration-cache/**
+
+      - name: Preparar APK com nome amigável
+        if: success()
+        shell: bash
         run: |
           set -euo pipefail
-          mv "app/build/outputs/apk/debug/app-debug.apk" \
-            "app/build/outputs/apk/debug/Apuração Eleitoral 2026.apk"
+          APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -print -quit)"
+          test -n "$APK"
+          mkdir -p dist
+          cp "$APK" "dist/Apuração Eleitoral 2026.apk"
 
-      - name: Disponibilizar APK
+      - name: Disponibilizar APK Debug
+        if: success()
         uses: actions/upload-artifact@v7
         with:
           name: ApuracaoEleitoral-APK
-          path: 'app/build/outputs/apk/debug/Apuração Eleitoral 2026.apk'
           if-no-files-found: error
+          path: dist/Apuração Eleitoral 2026.apk
