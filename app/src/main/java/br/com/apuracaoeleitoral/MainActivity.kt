@@ -55,6 +55,9 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -2580,12 +2583,54 @@ private fun Note(message: String) {
     }
 }
 
+// Imagens ilustradas aprovadas pelo usuário e empacotadas localmente no APK.
+// O nome (e nunca apenas a cor) decide qual imagem aparece.
+// Disputas de governador continuam sem retrato, pois os candidatos variam por UF.
+private fun candidatePortraitResource(name: String): Int? = when {
+    name.contains("Flávio Bolsonaro", ignoreCase = true) -> R.drawable.candidato_flavio
+    name.contains("Lula", ignoreCase = true) -> R.drawable.candidato_lula
+    else -> null
+}
+
+@Composable
+private fun CandidatePortrait(
+    name: String,
+    accent: Color,
+    size: Dp = 44.dp,
+    corner: Dp = 12.dp
+) {
+    val portrait = candidatePortraitResource(name)
+    if (portrait != null) {
+        val shape = RoundedCornerShape(corner)
+        Image(
+            painter = painterResource(id = portrait),
+            contentDescription = "Retrato ilustrado de $name",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.size(size)
+                .clip(shape)
+                .border(1.dp, accent.copy(alpha = 0.55f), shape)
+        )
+    } else {
+        Box(Modifier.size(size).clip(RoundedCornerShape(corner))
+            .background(accent.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(10.dp).clip(CircleShape).background(accent))
+        }
+    }
+}
+
 @Composable
 private fun CandidateInfo(name: String, votes: Double, share: Double, color: Color, modifier: Modifier = Modifier) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Box(Modifier.size(9.dp).background(color, CircleShape))
-            Text(name, maxLines = 2, fontSize = 12.sp, fontWeight = FontWeight.Medium, lineHeight = 15.sp)
+        Row(verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CandidatePortrait(name = name, accent = color, size = 46.dp, corner = 12.dp)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text(name, maxLines = 2, fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold, lineHeight = 15.sp,
+                    overflow = TextOverflow.Ellipsis, color = Tinta)
+                Box(Modifier.width(24.dp).height(3.dp)
+                    .clip(RoundedCornerShape(99.dp)).background(color))
+            }
         }
         Text(percentage(share * 100), color = Tinta, fontWeight = FontWeight.ExtraBold, fontSize = 28.sp)
         Text("${count(votes)} votos", fontSize = 12.sp, color = Secundario)
@@ -3262,10 +3307,11 @@ private fun EvolutionPage(
 @Composable
 private fun ProjectionPercentNumber(name: String, value: Double, tint: Color, modifier: Modifier = Modifier) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Box(Modifier.size(9.dp).clip(CircleShape).background(tint))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            CandidatePortrait(name = name, accent = tint, size = 32.dp, corner = 9.dp)
             Text(name, fontSize = 12.sp, fontWeight = FontWeight.Medium,
-                maxLines = 2, color = Tinta, overflow = TextOverflow.Ellipsis)
+                maxLines = 2, color = Tinta, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
         }
         // Percentuais ficam em alto contraste: escuros no tema claro e claros no tema escuro.
         Text(percentage(value), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tinta)
@@ -3350,8 +3396,9 @@ private fun ProjectionPercentChart(
 @Composable
 private fun ProjectionLegend(name: String, tint: Color, modifier: Modifier = Modifier) {
     Row(modifier, verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        Box(Modifier.width(14.dp).height(3.dp).clip(RoundedCornerShape(5.dp)).background(tint))
+        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        CandidatePortrait(name = name, accent = tint, size = 23.dp, corner = 7.dp)
+        Box(Modifier.width(12.dp).height(3.dp).clip(RoundedCornerShape(5.dp)).background(tint))
         Text(name, color = Tinta, fontSize = 11.sp, maxLines = 1,
             overflow = TextOverflow.Ellipsis)
     }
