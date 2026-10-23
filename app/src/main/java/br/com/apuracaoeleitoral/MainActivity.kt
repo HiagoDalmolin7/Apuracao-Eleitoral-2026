@@ -191,7 +191,7 @@ private val Azul: Color @Composable get() = LocalAppPalette.current.accent
 private val Aviso: Color @Composable get() = LocalAppPalette.current.notice
 private val GovernorBlue: Color @Composable get() = LocalAppPalette.current.governorBlue
 private val GovernorPurple: Color @Composable get() = LocalAppPalette.current.governorPurple
-private val PtBr = Locale("pt", "BR")
+private val PtBr = Locale.forLanguageTag("pt-BR")
 
 private val UFS = listOf(
     "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG",
@@ -366,11 +366,11 @@ private fun parseTseReport(json: String, region: String): TseReport? = runCatchi
     val done = sections.longField("st")
     val total = sections.longField("ts")
     require(total > 0L && done in 0..total)
-    require(votes22!! + votes13!! <= ballots.longField("tv") || ballots.longField("tv") == 0L)
+    require(votes22 + votes13 <= ballots.longField("tv") || ballots.longField("tv") == 0L)
     TseReport(
         location = region,
-        candidate22 = votes22!!,
-        candidate13 = votes13!!,
+        candidate22 = votes22,
+        candidate13 = votes13,
         sectionsDone = done,
         sectionsTotal = total,
         electorate = voters.longField("te"),
