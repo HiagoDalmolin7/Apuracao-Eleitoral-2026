@@ -124,7 +124,6 @@ import org.json.JSONObject
 import org.json.JSONArray
 import java.text.NumberFormat
 import java.util.Locale
-import kotlin.random.Random
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -896,83 +895,6 @@ private fun fetchGovernor(prefs: SharedPreferences, uf: String): GovernorDownloa
     }
 }
 
-// === SIMULADOR DE APURAÇÃO (EXCLUSIVAMENTE NA MEMÓRIA) ===
-// Os eleitores são quantidades FICTÍCIAS para teste de interface: jamais gravar
-// em tse_json_*, evolution_2026_*, dados manuais ou cache do serviço.
-private val TEST_ELECTORATE = mapOf(
-    "AC" to 650_000L, "AL" to 2_400_000L, "AP" to 600_000L,
-    "AM" to 2_900_000L, "BA" to 11_000_000L, "CE" to 6_900_000L,
-    "DF" to 2_200_000L, "ES" to 3_000_000L, "GO" to 5_000_000L,
-    "MA" to 5_100_000L, "MT" to 2_500_000L, "MS" to 2_100_000L,
-    "MG" to 16_100_000L, "PA" to 6_000_000L, "PB" to 3_200_000L,
-    "PR" to 8_500_000L, "PE" to 7_000_000L, "PI" to 2_600_000L,
-    "RJ" to 12_800_000L, "RN" to 2_700_000L, "RS" to 8_600_000L,
-    "RO" to 1_300_000L, "RR" to 420_000L, "SC" to 5_700_000L,
-    "SP" to 34_700_000L, "SE" to 1_700_000L, "TO" to 1_200_000L,
-    "ZZ" to 650_000L
-)
-
-// Uma chamada = +10 pontos percentuais em todas as regiões.
-// Todos os votos novos são não negativos; contagens observadas são cumulativas.
-private fun nextSimulatedElection(
-    previous: Map<String, TseReport>,
-    step: Int,
-    sessionSeed: Int
-): Map<String, TseReport> {
-    require(step in 1..10)
-    val simulated = (UFS + "ZZ").associateWith { region ->
-        val electorate = TEST_ELECTORATE.getValue(region)
-        val sections = if (region == "ZZ") 1_000L else 10_000L
-        val sectionsDone = sections * step / 10
-        val counted = electorate * step / 10
-        val old = previous[region]
-        val additionalElectors = counted - (old?.electorateCounted ?: 0L)
-        require(additionalElectors >= 0)
-        val index = (UFS + "ZZ").indexOf(region)
-        val rng = Random(sessionSeed xor (index * 65_537) xor (step * 1_306_103))
-        val turnoutNew = (additionalElectors * rng.nextDouble(0.76, 0.86)).toLong()
-        val blankNew = (turnoutNew * rng.nextDouble(0.012, 0.026)).toLong()
-        val nullNew = (turnoutNew * rng.nextDouble(0.020, 0.042)).toLong()
-        val validNew = turnoutNew - blankNew - nullNew
-        val baseShare = Random(sessionSeed xor (index * 94_129)).nextDouble(0.40, 0.60)
-        val share22 = (baseShare + rng.nextDouble(-0.07, 0.07)).coerceIn(0.24, 0.76)
-        val new22 = (validNew * share22).toLong()
-        val new13 = validNew - new22
-        val a = (old?.candidate22 ?: 0L) + new22
-        val b = (old?.candidate13 ?: 0L) + new13
-        val blanks = (old?.blank ?: 0L) + blankNew
-        val nulls = (old?.nullVotes ?: 0L) + nullNew
-        val turnout = (old?.turnout ?: 0L) + turnoutNew
-        TseReport(
-            location = region, candidate22 = a, candidate13 = b,
-            sectionsDone = sectionsDone, sectionsTotal = sections,
-            electorate = electorate, electorateCounted = counted,
-            totalBallots = turnout, officialValidVotes = a + b,
-            technicalNullVotes = 0L, turnout = turnout,
-            abstentions = counted - turnout,
-            blank = blanks, nullVotes = nulls,
-            generated = "SIMULAÇÃO • etapa $step/10", generationId = "TESTE-$step"
-        )
-    }
-    // BR é soma de todas as UFs e exterior. Nenhum voto é duplicado.
-    val parts = simulated.values
-    val national = TseReport(
-        location = "BR", candidate22 = parts.sumOf { it.candidate22 },
-        candidate13 = parts.sumOf { it.candidate13 },
-        sectionsDone = parts.sumOf { it.sectionsDone },
-        sectionsTotal = parts.sumOf { it.sectionsTotal },
-        electorate = parts.sumOf { it.electorate },
-        electorateCounted = parts.sumOf { it.electorateCounted },
-        totalBallots = parts.sumOf { it.totalBallots },
-        officialValidVotes = parts.sumOf { it.officialValidVotes },
-        technicalNullVotes = 0L,
-        turnout = parts.sumOf { it.turnout }, abstentions = parts.sumOf { it.abstentions },
-        blank = parts.sumOf { it.blank }, nullVotes = parts.sumOf { it.nullVotes },
-        generated = "SIMULAÇÃO • etapa $step/10", generationId = "TESTE-$step"
-    )
-    return simulated + ("BR" to national)
-}
-
 // === Histórico de evolução (gravado localmente; nenhum dado histórico é inventado) ===
 private data class EvolutionPoint(
     val moment: Long,
@@ -1391,30 +1313,6 @@ private fun ElectionApp() {
     }
     var selectedUF by remember { mutableStateOf("SC") }
     var tab by remember { mutableIntStateOf(0) }
-    // Não persistir teste: ao fechar o app, tudo volta automaticamente ao modo real.
-    var testStep by remember { mutableIntStateOf(0) }
-    var testReports by remember { mutableStateOf(emptyMap<String, TseReport>()) }
-    var testEvolution by remember { mutableStateOf(emptyList<EvolutionPoint>()) }
-    var testSeed by remember { mutableIntStateOf(0) }
-    fun advanceTest() {
-        val stage = if (testStep >= 10) 1 else testStep + 1
-        if (stage == 1) {
-            testSeed = SystemClock.elapsedRealtime().toInt()
-            testReports = emptyMap()
-            testEvolution = emptyList()
-        }
-        val next = nextSimulatedElection(testReports, stage, testSeed)
-        testReports = next
-        testStep = stage
-        val point = presidentEvolution(next, null, System.currentTimeMillis())
-        if (point != null) testEvolution = testEvolution + point
-        // Não chamar serviços, alertas de vitória, sons, JSONs oficiais ou SharedPreferences.
-    }
-    fun stopTest() {
-        testStep = 0
-        testReports = emptyMap()
-        testEvolution = emptyList()
-    }
     var showOptions by remember { mutableStateOf(false) }
     // Easter egg somente após TRÊS toques consecutivos na foto do mesmo candidato.
     // O relógio monotônico evita problemas se a hora do celular mudar.
@@ -1870,22 +1768,15 @@ private fun ElectionApp() {
         }
     }
     // A mesma lógica de projeção e o mesmo mapa são utilizados em ambos os modos.
-    val testActive = testStep > 0
-    val displayReports = if (testActive) testReports else reports
-    val displayStates = remember(displayReports) {
-        (UFS + "ZZ").associateWith { uf ->
-            stateFromOfficial(displayReports[uf]).let { if (it.uf.isBlank()) it.copy(uf = uf) else it }
-        }
-    }
-    val all = if (testActive) displayStates else if (manualMode) manualStates else officialStates
+    // Dados exibidos são somente os registros reais: TSE ou modo manual.
+    val all = if (manualMode) manualStates else officialStates
     val projections = remember(all) { all.mapValues { estimate(it.value) } }
     val projected = projections.values.filter { it.valid }
     val projectedA = projected.sumOf { it.a }
     val projectedB = projected.sumOf { it.b }
-    val mainReport = displayReports["BR"]
-    val exterior = displayReports["ZZ"]
+    val mainReport = reports["BR"]
+    val exterior = reports["ZZ"]
     val status = when {
-        testActive -> "SIMULAÇÃO • etapa $testStep/10 • ${testStep * 10}% de seções • dados fictícios"
         manualMode -> "Modo manual • alterações salvas automaticamente"
         loading && lastCheck == 0L -> "Conectando ao TSE..."
         lastGood == 0L -> "Aguardando dados oficiais do TSE"
@@ -2054,7 +1945,7 @@ private fun ElectionApp() {
                 },
                 label = "Transição horizontal das páginas"
             ) { pageTab ->
-            if (electionMode == "governador" && !testActive) {
+            if (electionMode == "governador") {
                 val stateReport = governorReports[selectedGovernorUF]
                 val govStatus = when {
                     governorLoading && governorLastGood == 0L -> "Conectando aos resultados estaduais do TSE..."
@@ -2090,7 +1981,7 @@ private fun ElectionApp() {
                     )
                     else -> GovernorStatistics(Modifier.padding(padding), selectedGovernorUF, stateReport, govStatus)
                 }
-            } else if (manualMode && !testActive) {
+            } else if (manualMode) {
                 when (pageTab) {
                     0 -> ManualDashboard(
                         modifier = Modifier.padding(padding),
@@ -2140,8 +2031,7 @@ private fun ElectionApp() {
                         national = mainReport, exterior = exterior,
                         projectedA = projectedA, projectedB = projectedB,
                         stateEstimates = projections, status = status,
-                        failed = if (testActive) emptySet() else unavailable,
-                        simulated = testActive,
+                        failed = unavailable,
                         onChoose = { selectedUF = it; tab = 1 },
                         onStates = { tab = 1 },
                         onEasterEgg = { number -> handleCandidatePortraitTap(number) }
@@ -2150,36 +2040,32 @@ private fun ElectionApp() {
                         modifier = Modifier.padding(padding),
                         candidateA = labelsA, candidateB = labelsB,
                         selected = selectedUF, onSelect = { selectedUF = it },
-                        report = displayReports[selectedUF], estimate = projections.getValue(selectedUF),
-                        all = displayReports, failures = if (testActive) emptySet() else unavailable,
-                        status = status, simulated = testActive
+                        report = reports[selectedUF], estimate = projections.getValue(selectedUF),
+                        all = reports, failures = unavailable,
+                        status = status
                     )
                     2 -> MapPage(
                         modifier = Modifier.padding(padding),
                         candidateA = labelsA, candidateB = labelsB,
                         computed = projections.filterKeys { it in UFS },
-                        editState = { selectedUF = it; tab = 1 }, manualMode = false, simulated = testActive
+                        editState = { selectedUF = it; tab = 1 }, manualMode = false
                     )
                     3 -> EvolutionPage(
                         modifier = Modifier.padding(padding),
-                        title = if (testActive) "SIMULAÇÃO • Presidente" else "Presidente • TSE",
-                        points = if (testActive) testEvolution else autoEvolution,
-                        simulated = testActive,
+                        title = "Presidente • TSE",
+                        points = autoEvolution,
                         nameA = labelsA, nameB = labelsB,
                         colorA = Verde, colorB = Vermelho,
-                        description = if (testActive)
-                            "SIMULAÇÃO: pontos fictícios gerados etapa a etapa. Não são votos reais do TSE."
-                        else "Votos apurados oficialmente e projeção por UF, incluindo exterior quando disponível. Projeção não oficial."
+                        description = "Votos apurados oficialmente e projeção por UF, incluindo exterior quando disponível. Projeção não oficial."
                     )
                     else -> OfficialStatistics(
                         modifier = Modifier.padding(padding),
                         national = mainReport,
                         exterior = exterior,
-                        sources = displayReports,
+                        sources = reports,
                         projected = projections,
                         status = status,
-                        failed = if (testActive) emptySet() else unavailable,
-                        simulated = testActive
+                        failed = unavailable
                     )
                 }
             }
@@ -2208,8 +2094,7 @@ private fun ElectionApp() {
                                     fontSize = 18.sp, color = Tinta, maxLines = 1)
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        if (testActive) "SIMULAÇÃO • Presidente • ${testStep * 10}%"
-                                        else if (electionMode == "governador") "Governador • $selectedGovernorUF • TSE"
+                                        if (electionMode == "governador") "Governador • $selectedGovernorUF • TSE"
                                         else if (manualMode) "Presidente • Brasil • Manual"
                                         else "Presidente • Brasil • TSE",
                                         fontSize = 11.sp, color = Secundario, maxLines = 1
@@ -2218,7 +2103,7 @@ private fun ElectionApp() {
                             }
                         },
                         actions = {
-                            if (!testActive && (electionMode == "governador" || !manualMode)) {
+                            if (electionMode == "governador" || !manualMode) {
                                 if (if (electionMode == "governador") governorLoading else loading) {
                                     CircularProgressIndicator(
                                         modifier = Modifier.padding(horizontal = 10.dp).size(18.dp),
@@ -2269,51 +2154,6 @@ private fun ElectionApp() {
                         .fillMaxWidth()
                         .padding(start = 15.dp, end = 15.dp, bottom = navInset + 8.dp),
                     hazeState = dockHazeState
-                )
-            }
-            // Controles flutuantes de teste acima da pílula, em TODAS as cinco abas.
-            // Os testes não escrevem nos dados oficiais/manuais, não acionam áudio
-            // e não alteram a notificação de acompanhamento real.
-            Column(
-                modifier = Modifier.align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = navInset + 99.dp),
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(7.dp)
-            ) {
-                if (testActive) {
-                    Surface(
-                        shape = RoundedCornerShape(15.dp),
-                        color = Color(0xFF5D2B15),
-                        shadowElevation = 3.dp
-                    ) {
-                        Column(Modifier.padding(horizontal = 13.dp, vertical = 7.dp)) {
-                            Text("SIMULAÇÃO • ${testStep * 10}%", color = Color.White,
-                                fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                            Text("Números fictícios • sem vínculo com TSE", color = Color.White,
-                                fontSize = 10.sp)
-                        }
-                    }
-                    OutlinedButton(
-                        onClick = { stopTest() },
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = .96f)
-                        ),
-                        shape = RoundedCornerShape(18.dp)
-                    ) { Text("Encerrar teste", fontWeight = FontWeight.SemiBold) }
-                }
-                ExtendedFloatingActionButton(
-                    onClick = { advanceTest() },
-                    containerColor = Azul,
-                    contentColor = if (darkMode) Color(0xFF0D1420) else Color.White,
-                    shape = RoundedCornerShape(22.dp),
-                    text = {
-                        Text(when (testStep) {
-                            0 -> "Iniciar teste • 10%"
-                            10 -> "Reiniciar • 10%"
-                            else -> "Próxima etapa • ${(testStep + 1) * 10}%"
-                        }, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                    },
-                    icon = { Text("▸", fontSize = 19.sp, fontWeight = FontWeight.Bold) }
                 )
             }
             } // Área de conteúdo e dock
@@ -3558,9 +3398,9 @@ private fun RatioBar(a: Double, b: Double, modifier: Modifier = Modifier, thickn
 // Esse agregado já inclui as UFs e o exterior: nunca somar ZZ outra vez.
 // O eleitorado total existe antes da apuração; demais métricas podem começar zeradas.
 @Composable
-private fun NationalTotalsCard(national: TseReport?, simulated: Boolean = false) {
+private fun NationalTotalsCard(national: TseReport?) {
     SurfaceCard {
-        Text(if (simulated) "Brasil • totais de SIMULAÇÃO" else "Brasil • totais oficiais do TSE",
+        Text("Brasil • totais oficiais do TSE",
             fontSize = 18.sp, fontWeight = FontWeight.Bold)
         if (national == null) {
             Text(
@@ -3598,7 +3438,7 @@ private fun NationalTotalsCard(national: TseReport?, simulated: Boolean = false)
                 }
                 HorizontalDivider(color = Borda)
                 SummaryLine("Total de votos contabilizados", count(national.totalBallots.toDouble()))
-                SummaryLine(if (simulated) "Votos válidos simulados" else "Votos válidos (TSE)",
+                SummaryLine("Votos válidos (TSE)",
                     count(national.officialValidVotes.toDouble()))
                 SummaryLine("Votos em branco", count(national.blank.toDouble()))
                 SummaryLine("Votos nulos", count(national.nullVotes.toDouble()))
@@ -3613,13 +3453,12 @@ private fun NationalTotalsCard(national: TseReport?, simulated: Boolean = false)
                 )
             }
             Text(
-                (if (simulated) "TESTE: Brasil calculado como soma das 27 UFs + Exterior. "
-                else "Fonte: TSE, arquivo nacional BR (inclui o exterior). ") +
+                "Fonte: TSE, arquivo nacional BR (inclui o exterior). " +
                     "Comparecimento e abstenções são parciais enquanto a apuração não termina.",
                 color = Secundario, fontSize = 11.sp
             )
             if (national.generated.isNotBlank()) {
-                Text(if (simulated) national.generated else "Dados TSE: ${national.generated}",
+                Text("Dados TSE: ${national.generated}",
                     color = Secundario, fontSize = 11.sp)
             }
         }
@@ -3634,19 +3473,17 @@ private fun OfficialDashboard(
     projectedA: Double, projectedB: Double,
     stateEstimates: Map<String, Estimate>, status: String,
     failed: Set<String>, onChoose: (String) -> Unit, onStates: () -> Unit,
-    onEasterEgg: (Int) -> Unit, simulated: Boolean = false
+    onEasterEgg: (Int) -> Unit
 ) {
     val validOfficial = national?.takeIf { it.hasVotes }
     val validProjection = stateEstimates.values.count { it.valid }
     val allProjected = projectedA + projectedB
     val projectedLabel = if (validProjection == 28) "Brasil + exterior" else "$validProjection de 28 regiões"
     ContentColumn(modifier) {
-        Note(if (simulated)
-            "MODO DE TESTE • TODOS OS NÚMEROS DESTA TELA SÃO FICTÍCIOS. Nenhum resultado será enviado ao TSE, salvo ou usado para anunciar uma vitória real."
-        else "DADOS OFICIAIS TSE • Os votos apurados são do TSE. As projeções são cálculos independentes, sujeitos a mudanças conforme chegam novas urnas.")
+        Note("DADOS OFICIAIS TSE • Os votos apurados são do TSE. As projeções são cálculos independentes, sujeitos a mudanças conforme chegam novas urnas.")
         Text(status, color = Secundario, fontSize = 12.sp)
         SurfaceCard {
-            Text(if (simulated) "Resultado simulado • votos acumulados" else "Resultado oficial apurado",
+            Text("Resultado oficial apurado",
                 fontSize = 19.sp, fontWeight = FontWeight.Bold)
             if (validOfficial == null) {
                 Text("Aguardando divulgação de votos do segundo turno pelo TSE.", color = Secundario)
@@ -3670,8 +3507,7 @@ private fun OfficialDashboard(
                         onPortraitClick = { onEasterEgg(13) }, portraitOverride = R.drawable.candidato_lula)
                 }
                 RatioBar(validOfficial.candidate22.toDouble(), validOfficial.candidate13.toDouble(), thickness = 14)
-                // A simulação jamais deve exibir um anúncio real de vitória.
-                (if (simulated) null else mathematicalVictory(validOfficial))?.let { decision ->
+                mathematicalVictory(validOfficial)?.let { decision ->
                     val winnerName = if (decision.candidateNumber == 22) candidateA else candidateB
                     val winnerColor = if (decision.candidateNumber == 22) Verde else Vermelho
                     Surface(
@@ -3694,11 +3530,11 @@ private fun OfficialDashboard(
                 }
                 SummaryLine("Votos válidos contabilizados", count(validOfficial.validVotes.toDouble()))
                 SummaryLine("Brancos / nulos", "${count(validOfficial.blank.toDouble())} / ${count(validOfficial.nullVotes.toDouble())}")
-                Text(if (simulated) validOfficial.generated else "Arquivo TSE: ${validOfficial.generated}",
+                Text("Arquivo TSE: ${validOfficial.generated}",
                     fontSize = 11.sp, color = Secundario)
             }
         }
-        NationalTotalsCard(national, simulated)
+        NationalTotalsCard(national)
         SurfaceCard {
             Text("Projeção proporcional", fontSize = 19.sp, fontWeight = FontWeight.Bold)
             Text("Abrangência: $projectedLabel", color = Secundario, fontSize = 12.sp)
@@ -3729,8 +3565,7 @@ private fun OfficialDashboard(
                 SummaryLine(candidateB, count(exterior.candidate13.toDouble()))
                 SummaryLine("Votos válidos", count(exterior.validVotes.toDouble()))
             } else {
-                Text(if (simulated) "Aguardando votos fictícios do exterior."
-                    else "Aguardando votos oficiais do exterior.", fontSize = 13.sp, color = Secundario)
+                Text("Aguardando votos oficiais do exterior.", fontSize = 13.sp, color = Secundario)
             }
             TextButton(onClick = { onChoose("ZZ") }) { Text("Detalhes do exterior") }
         }
@@ -3740,7 +3575,7 @@ private fun OfficialDashboard(
                 TextButton(onClick = onStates) { Text("Ver 27 UFs") }
             }
             val available = UFS.filter { stateEstimates.getValue(it).valid }
-            if (available.isEmpty()) Text(if (simulated) "Aguardando etapa simulada." else "Aguardando dados estaduais do TSE.", color = Secundario)
+            if (available.isEmpty()) Text("Aguardando dados estaduais do TSE.", color = Secundario)
             else available.take(6).forEach { uf ->
                 StateSummaryRow(uf, stateEstimates.getValue(uf)) { onChoose(uf) }
             }
@@ -3801,13 +3636,11 @@ private fun OfficialRegions(
     candidateA: String, candidateB: String,
     selected: String, onSelect: (String) -> Unit,
     report: TseReport?, estimate: Estimate,
-    all: Map<String, TseReport>, failures: Set<String>, status: String,
-    simulated: Boolean = false
+    all: Map<String, TseReport>, failures: Set<String>, status: String
 ) {
     ContentColumn(modifier) {
         Text("Apuração por região", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Text(if (simulated) "SIMULAÇÃO: 27 UFs e Exterior • números fictícios cumulativos"
-            else "Dados importados automaticamente do TSE • 27 UFs e exterior",
+        Text("Dados importados automaticamente do TSE • 27 UFs e exterior",
             color = Secundario, fontSize = 12.sp)
         Text(status, color = Secundario, fontSize = 12.sp)
         SurfaceCard {
@@ -3845,7 +3678,7 @@ private fun OfficialRegions(
                 SummaryLine("Comparecimento observado", count(report.turnout.toDouble()))
                 SummaryLine("Abstenções observadas", count(report.abstentions.toDouble()))
                 SummaryLine("Brancos e nulos", "${count(report.blank.toDouble())} / ${count(report.nullVotes.toDouble())}")
-                Text(if (simulated) report.generated else "Dados TSE gerados em ${report.generated}",
+                Text("Dados TSE gerados em ${report.generated}",
                     fontSize = 11.sp, color = Secundario)
             }
             if (selected in failures) Note("Não foi possível atualizar esta região agora. Se houver números acima, eles são do último arquivo salvo.")
@@ -3859,8 +3692,7 @@ private fun OfficialRegions(
                 SummaryLine("Votos válidos projetados", count(estimate.validos))
                 if (estimate.warning.isNotBlank()) Note(estimate.warning)
             } else Text("Projeção indisponível até a divulgação dos primeiros votos.", color = Secundario)
-            Text(if (simulated) "Projeção de teste, calculada a partir de votos fictícios."
-                else "Projeção calculada, não divulgada pelo TSE.", fontSize = 12.sp, color = Secundario)
+            Text("Projeção calculada, não divulgada pelo TSE.", fontSize = 12.sp, color = Secundario)
         }
         SurfaceCard {
             Text("Resumo das regiões", fontSize = 17.sp, fontWeight = FontWeight.Bold)
@@ -3886,17 +3718,16 @@ private fun OfficialStatistics(
     sources: Map<String, TseReport>,
     projected: Map<String, Estimate>,
     status: String,
-    failed: Set<String>,
-    simulated: Boolean = false
+    failed: Set<String>
 ) {
     val regionsWithVotes = (UFS + "ZZ").count { sources[it]?.hasVotes == true }
     val projectedRows = projected.values.filter { it.valid }
     ContentColumn(modifier) {
         Text("Estatísticas", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text(status, fontSize = 12.sp, color = Secundario)
-        NationalTotalsCard(national, simulated)
+        NationalTotalsCard(national)
         SurfaceCard {
-            Text(if (simulated) "Exterior • dados de SIMULAÇÃO" else "Exterior • resultado oficial", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Text("Exterior • resultado oficial", fontSize = 17.sp, fontWeight = FontWeight.Bold)
             if (exterior?.hasVotes == true) {
                 SummaryLine("Seções totalizadas", percentage(exterior.sectionsPercent))
                 SummaryLine("Eleitorado", count(exterior.electorate.toDouble()))
@@ -3907,7 +3738,7 @@ private fun OfficialStatistics(
                 SummaryLine("Nulos", count(exterior.nullVotes.toDouble()))
                 SummaryLine("Abstenções", count(exterior.abstentions.toDouble()))
             } else Text("Ainda sem votos publicados no exterior.", color = Secundario)
-            Text(if (simulated) "Total fictício do exterior, sem mapa de países." else "Total oficial do exterior, sem mapa de países.", fontSize = 12.sp, color = Secundario)
+            Text("Total oficial do exterior, sem mapa de países.", fontSize = 12.sp, color = Secundario)
         }
         SurfaceCard {
             Text("Projeções matemáticas", fontSize = 17.sp, fontWeight = FontWeight.Bold)
@@ -3918,7 +3749,7 @@ private fun OfficialStatistics(
             SummaryLine("Abstenções projetadas", count(projectedRows.sumOf { it.abst }))
             Text("Somente regiões com votos apurados. Resultados não são oficiais e não incluem municípios sem amostra.", fontSize = 12.sp, color = Secundario)
         }
-        Note(if (simulated) "SIMULAÇÃO • TODOS OS VALORES SÃO FICTÍCIOS. Não representam votos oficiais nem previsões eleitorais." else "Este aplicativo é independente e não representa o TSE. Os totais oficiais são publicados pelo Tribunal; os números projetados são cálculos proporcionais do aplicativo.")
+        Note("Este aplicativo é independente e não representa o TSE. Os totais oficiais são publicados pelo Tribunal; os números projetados são cálculos proporcionais do aplicativo.")
         if (failed.isNotEmpty()) Text("Sem atualização recente: ${failed.sorted().joinToString()}", color = Aviso, fontSize = 12.sp)
     }
 }
@@ -4197,8 +4028,7 @@ private fun EvolutionPage(
     colorA: Color,
     colorB: Color,
     description: String,
-    onClear: (() -> Unit)? = null,
-    simulated: Boolean = false
+    onClear: (() -> Unit)? = null
 ) {
     val percentHistory = remember(points) { projectionPercentHistory(points) }
     ContentColumn(modifier) {
@@ -4246,9 +4076,7 @@ private fun EvolutionPage(
             }
         }
         Text(
-            if (simulated) "SIMULAÇÃO • Histórico temporário gerado etapa por etapa. " +
-                "Não foi salvo e será descartado ao encerrar o teste."
-            else "Cada ponto representa uma projeção calculada a partir dos dados registrados naquele momento. " +
+            "Cada ponto representa uma projeção calculada a partir dos dados registrados naquele momento. " +
                 "Consultas sem alterações não acrescentam pontos. Histórico salvo no próprio aparelho.",
             fontSize = 12.sp, color = Secundario
         )
@@ -4359,7 +4187,7 @@ private fun ProjectionPercentChart(
         zoom = target
     }
 
-    // Quando chegam novos dados (ou a próxima etapa do simulador), mostrar o mais recente.
+    // Ao receber novos dados oficiais ou manuais, mostrar o registro mais recente.
     LaunchedEffect(history.size) {
         selectedIndex = history.lastIndex
         centerIndex = boundsCenter(zoom, history.lastIndex.toFloat())
@@ -4851,8 +4679,7 @@ private fun MapPage(
     candidateA: String, candidateB: String,
     computed: Map<String, Estimate>,
     editState: (String) -> Unit,
-    manualMode: Boolean,
-    simulated: Boolean = false
+    manualMode: Boolean
 ) {
     val geometry = remember { readBrazilMap() }
     var picked by remember { mutableStateOf("SC") }
@@ -4862,8 +4689,7 @@ private fun MapPage(
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Mapa da apuração", fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Text(
-                if (simulated) "SIMULAÇÃO • Toque em uma UF para consultar votos fictícios."
-                else if (manualMode) "Toque em uma UF para consultar sua projeção manual."
+                if (manualMode) "Toque em uma UF para consultar sua projeção manual."
                 else "Toque em uma UF para consultar votos oficiais e projeção.",
                 fontSize = 13.sp, color = Secundario
             )
@@ -4877,8 +4703,7 @@ private fun MapPage(
             Text("Aproxime dois dedos ou toque em + para ampliar. Arraste para explorar e use ↺ para restaurar.",
                 fontSize = 11.sp, color = Secundario)
             Text(
-                if (simulated) "Cor calculada com dados fictícios de teste."
-                else if (manualMode) "Cor do candidato à frente, com intensidade conforme os votos digitados em cada UF."
+                if (manualMode) "Cor do candidato à frente, com intensidade conforme os votos digitados em cada UF."
                 else "Cor do candidato à frente, com intensidade conforme os votos oficiais apurados em cada UF.",
                 fontSize = 12.sp, color = Secundario
             )
@@ -4908,7 +4733,7 @@ private fun MapPage(
                 "Cinza central = empate.", fontSize = 11.sp, color = Secundario)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Box(Modifier.size(11.dp).background(LocalAppPalette.current.emptyState, RoundedCornerShape(3.dp)))
-                Text(if (simulated) "Cinza = sem dados simulados" else "Cinza = sem votos oficiais disponíveis",
+                Text("Cinza = sem votos oficiais disponíveis",
                     fontSize = 12.sp, color = Secundario)
             }
         }
@@ -4946,8 +4771,7 @@ private fun MapPage(
                 RatioBar(current.a, current.b, thickness = 12)
                 HorizontalDivider(color = Borda)
                 SummaryLine("Votos válidos projetados", count(current.validos))
-                SummaryLine(if (simulated) "Votos simulados acumulados"
-                    else if (manualMode) "Votos informados" else "Votos apurados pelo TSE", count(current.observedA + current.observedB))
+                SummaryLine(if (manualMode) "Votos informados" else "Votos apurados pelo TSE", count(current.observedA + current.observedB))
                 if (current.warning.isNotBlank()) Note(current.warning)
             } else {
                 Text(
@@ -4957,13 +4781,11 @@ private fun MapPage(
                 )
             }
             Button(onClick = { editState(picked) }, modifier = Modifier.fillMaxWidth()) {
-                Text(if (simulated) "Ver etapa simulada de $picked"
-                    else if (manualMode) "Editar dados de $picked" else "Ver dados oficiais de $picked")
+                Text(if (manualMode) "Editar dados de $picked" else "Ver dados oficiais de $picked")
             }
         }
         Note(
-            if (simulated) "MAPA DE SIMULAÇÃO • Cores e projeções usam apenas os votos fictícios gerados por etapa."
-            else if (manualMode) "MAPA MANUAL • As cores refletem a proporção dos votos digitados em cada estado. A projeção matemática é calculada separadamente."
+            if (manualMode) "MAPA MANUAL • As cores refletem a proporção dos votos digitados em cada estado. A projeção matemática é calculada separadamente."
             else "MAPA INDEPENDENTE • As cores refletem a proporção dos votos oficialmente apurados em cada UF, não o avanço das seções. A projeção é calculada separadamente."
         )
         Text("Geometria simplificada dos estados (TopoJSON, licença MIT), disponível no app sem internet.", color = Secundario, fontSize = 11.sp)
