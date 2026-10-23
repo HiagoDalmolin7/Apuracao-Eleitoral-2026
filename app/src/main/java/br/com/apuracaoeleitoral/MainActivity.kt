@@ -113,15 +113,83 @@ import dev.chrisbanes.haze.blur.hazeBlur
 import dev.chrisbanes.haze.blur.HazeBlurStyle
 import dev.chrisbanes.haze.blur.HazeColorEffect
 
-// Cores identificadoras dos candidatos. Números e percentuais permanecem pretos.
+// Verde e vermelho permanecem associados aos candidatos nos dois temas.
 private val Verde = Color(0xFF198754)
 private val Vermelho = Color(0xFFD32F2F)
-private val Azul = Color(0xFF234E8A)
-private val Fundo = Color(0xFFF5F7FA)
-private val Tinta = Color(0xFF172235)
-private val Secundario = Color(0xFF667085)
-private val Borda = Color(0xFFE4E9F0)
-private val Aviso = Color(0xFF966100)
+
+private data class AppPalette(
+    val background: Color,
+    val surface: Color,
+    val sheet: Color,
+    val text: Color,
+    val secondary: Color,
+    val border: Color,
+    val accent: Color,
+    val notice: Color,
+    val noticeBackground: Color,
+    val noticeText: Color,
+    val track: Color,
+    val mapBackground: Color,
+    val emptyState: Color,
+    val governorBlue: Color,
+    val governorPurple: Color,
+    val glassTint: Color,
+    val glassFallback: Color,
+    val glassBorder: Color
+)
+
+private val LightPalette = AppPalette(
+    background = Color(0xFFF5F7FA),
+    surface = Color.White,
+    sheet = Color(0xFFF6F8FC),
+    text = Color(0xFF172235),
+    secondary = Color(0xFF667085),
+    border = Color(0xFFE4E9F0),
+    accent = Color(0xFF234E8A),
+    notice = Color(0xFF966100),
+    noticeBackground = Color(0xFFFFF8E9),
+    noticeText = Color(0xFF725016),
+    track = Color(0xFFE7EBF0),
+    mapBackground = Color(0xFFF9FBFD),
+    emptyState = Color(0xFFE2E7ED),
+    governorBlue = Color(0xFF245AA6),
+    governorPurple = Color(0xFF9055A2),
+    glassTint = Color.White.copy(alpha = 0.64f),
+    glassFallback = Color.White.copy(alpha = 0.93f),
+    glassBorder = Color.White.copy(alpha = 0.82f)
+)
+
+private val DarkPalette = AppPalette(
+    background = Color(0xFF0D1420),
+    surface = Color(0xFF182333),
+    sheet = Color(0xFF151F2D),
+    text = Color(0xFFF3F6FC),
+    secondary = Color(0xFFACBBD0),
+    border = Color(0xFF344256),
+    accent = Color(0xFF95BEFF),
+    notice = Color(0xFFF0C67B),
+    noticeBackground = Color(0xFF382D1A),
+    noticeText = Color(0xFFFFDCAA),
+    track = Color(0xFF344154),
+    mapBackground = Color(0xFF142031),
+    emptyState = Color(0xFF46576D),
+    governorBlue = Color(0xFF7AACFF),
+    governorPurple = Color(0xFFD29BFF),
+    glassTint = Color(0xFF24334A).copy(alpha = 0.74f),
+    glassFallback = Color(0xFF1B293A).copy(alpha = 0.96f),
+    glassBorder = Color.White.copy(alpha = 0.18f)
+)
+
+private val LocalAppPalette = androidx.compose.runtime.staticCompositionLocalOf { LightPalette }
+
+private val Fundo: Color @Composable get() = LocalAppPalette.current.background
+private val Tinta: Color @Composable get() = LocalAppPalette.current.text
+private val Secundario: Color @Composable get() = LocalAppPalette.current.secondary
+private val Borda: Color @Composable get() = LocalAppPalette.current.border
+private val Azul: Color @Composable get() = LocalAppPalette.current.accent
+private val Aviso: Color @Composable get() = LocalAppPalette.current.notice
+private val GovernorBlue: Color @Composable get() = LocalAppPalette.current.governorBlue
+private val GovernorPurple: Color @Composable get() = LocalAppPalette.current.governorPurple
 private val PtBr = Locale("pt", "BR")
 
 private val UFS = listOf(
@@ -388,8 +456,7 @@ private fun fetchTseRegion(prefs: SharedPreferences, region: String): DownloadRe
 // Fonte: TSE EA20. Presidente: 6258/cargo 1; governador: 6260/cargo 3.
 // Os seis segundos turnos estaduais foram divulgados pelo TSE em 14/10/2026.
 private val GOVERNOR_UFS = listOf("AC", "AM", "DF", "ES", "RN", "TO")
-private val GOVERNOR_BLUE = Color(0xFF245AA6)
-private val GOVERNOR_PURPLE = Color(0xFF9055A2)
+// Tons de governador são selecionados pelo tema na camada de interface.
 
 private data class GovernorCandidate(
     val number: String,
@@ -605,21 +672,23 @@ class MainActivity : ComponentActivity() {
             }
         }
         // Conteúdo edge-to-edge: o app ocupa toda a janela e controla seus próprios insets.
-        // Mantemos os indicadores do Android visíveis e contrastantes sobre fundo claro.
+        // Os ícones do sistema acompanham o tema claro/escuro salvo no aparelho.
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent { ElectionApp() }
-        // Ícones escuros sobre a barra de status clara, inclusive no modo edge-to-edge.
+        // Contraste do sistema acompanha o tema atual.
         applySystemBarContrast()
     }
 
     @Suppress("DEPRECATION")
     private fun applySystemBarContrast() {
+        val dark = getSharedPreferences("apuracao_v2", Context.MODE_PRIVATE)
+            .getBoolean("tema_escuro_2026", false)
         WindowCompat.getInsetsController(window, window.decorView).apply {
-            // No Android, "LightStatusBars" significa FUNDO claro, com ícones escuros.
-            isAppearanceLightStatusBars = true
-            isAppearanceLightNavigationBars = true
+            // LightStatusBars=true: ícones escuros; false: ícones claros.
+            isAppearanceLightStatusBars = !dark
+            isAppearanceLightNavigationBars = !dark
         }
-        // Em APIs anteriores à transparência obrigatória, manter o fundo da barra branco.
+        // Barras transparentes no modo edge-to-edge.
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         window.navigationBarColor = android.graphics.Color.TRANSPARENT
         if (Build.VERSION.SDK_INT >= 29) {
@@ -900,6 +969,15 @@ private fun ElectionApp() {
     var selectedUF by remember { mutableStateOf("SC") }
     var tab by remember { mutableIntStateOf(0) }
     var showOptions by remember { mutableStateOf(false) }
+    // Tema salvo no aparelho, com a opção no menu de três pontos.
+    var darkMode by remember { mutableStateOf(prefs.getBoolean("tema_escuro_2026", false)) }
+    val palette = if (darkMode) DarkPalette else LightPalette
+    SideEffect {
+        WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {
+            isAppearanceLightStatusBars = !darkMode
+            isAppearanceLightNavigationBars = !darkMode
+        }
+    }
     // A barra de ferramentas e a navegação inferior acompanham o dedo, sem consumir a rolagem.
     // O usuário puxa para cima para recolhê-las e para baixo para reaparecerem.
     val density = LocalDensity.current
@@ -1223,11 +1301,28 @@ private fun ElectionApp() {
     val labelsB = "Lula"
 
     MaterialTheme(
-        colorScheme = lightColorScheme(
-            primary = Azul, background = Fundo, surface = Color.White,
-            onSurface = Tinta, onBackground = Tinta
+        colorScheme = if (darkMode) darkColorScheme(
+            primary = palette.accent,
+            onPrimary = Color(0xFF0E2036),
+            background = palette.background,
+            onBackground = palette.text,
+            surface = palette.surface,
+            onSurface = palette.text,
+            surfaceVariant = palette.sheet,
+            onSurfaceVariant = palette.secondary,
+            outline = palette.border
+        ) else lightColorScheme(
+            primary = palette.accent,
+            background = palette.background,
+            onBackground = palette.text,
+            surface = palette.surface,
+            onSurface = palette.text,
+            surfaceVariant = palette.sheet,
+            onSurfaceVariant = palette.secondary,
+            outline = palette.border
         ), typography = Typography()
     ) {
+        CompositionLocalProvider(LocalAppPalette provides palette) {
         if (showOptions) {
             ElectionOptionsSheet(
                 sheetState = optionsSheetState,
@@ -1235,6 +1330,11 @@ private fun ElectionApp() {
                 electionMode = electionMode,
                 selectedGovernor = selectedGovernorUF,
                 automatic = !manualMode,
+                darkMode = darkMode,
+                onDarkModeChange = { enabled ->
+                    darkMode = enabled
+                    prefs.edit().putBoolean("tema_escuro_2026", enabled).apply()
+                },
                 notificationEnabled = notificationOn,
                 notificationError = notificationError,
                 status = if (electionMode == "governador") {
@@ -1275,6 +1375,7 @@ private fun ElectionApp() {
         // A intensidade não depende de um booleano: segue o deslocamento da folha,
         // acompanhando também o gesto de fechamento, sem saltos bruscos.
         val menuBackgroundBlur = if (Build.VERSION.SDK_INT >= 31) (sheetReveal * 8f).dp else 0.dp
+        val edgeFadeColor = Fundo // capturado fora do DrawScope
         Scaffold(
             modifier = Modifier.fillMaxSize()
                 .nestedScroll(chromeNestedScroll)
@@ -1328,7 +1429,7 @@ private fun ElectionApp() {
                                 }
                             }
                         },
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
                         )
                         HorizontalDivider(color = Borda, thickness = 0.8.dp)
                     }
@@ -1346,13 +1447,13 @@ private fun ElectionApp() {
                     val edge = 42.dp.toPx()
                     drawRect(
                         brush = Brush.verticalGradient(
-                            colors = listOf(Fundo.copy(alpha = opacity), Fundo.copy(alpha = 0f)),
+                            colors = listOf(edgeFadeColor.copy(alpha = opacity), edgeFadeColor.copy(alpha = 0f)),
                             startY = 0f, endY = edge
                         )
                     )
                     drawRect(
                         brush = Brush.verticalGradient(
-                            colors = listOf(Fundo.copy(alpha = 0f), Fundo.copy(alpha = opacity)),
+                            colors = listOf(edgeFadeColor.copy(alpha = 0f), edgeFadeColor.copy(alpha = opacity)),
                             startY = (size.height - edge).coerceAtLeast(0f), endY = size.height
                         )
                     )
@@ -1404,7 +1505,7 @@ private fun ElectionApp() {
                         points = governorEvolutionHistory[selectedGovernorUF].orEmpty(),
                         nameA = stateReport?.candidates?.getOrNull(0)?.name ?: "Candidato 1",
                         nameB = stateReport?.candidates?.getOrNull(1)?.name ?: "Candidato 2",
-                        colorA = GOVERNOR_BLUE, colorB = GOVERNOR_PURPLE,
+                        colorA = GovernorBlue, colorB = GovernorPurple,
                         description = "Dados oficiais do TSE. As projeções usam o percentual de seções apuradas."
                     )
                     else -> GovernorStatistics(Modifier.padding(padding), selectedGovernorUF, stateReport, govStatus)
@@ -1530,6 +1631,7 @@ private fun ElectionApp() {
             } // Área de conteúdo e dock
 
         }
+        } // CompositionLocalProvider: paleta claro/escuro de toda a interface
     }
 }
 
@@ -1543,6 +1645,8 @@ private fun ElectionOptionsSheet(
     electionMode: String,
     selectedGovernor: String,
     automatic: Boolean,
+    darkMode: Boolean,
+    onDarkModeChange: (Boolean) -> Unit,
     notificationEnabled: Boolean,
     notificationError: Boolean,
     status: String,
@@ -1558,7 +1662,8 @@ private fun ElectionOptionsSheet(
     val isGovernor = electionMode == "governador"
     var showGovernorList by remember(isGovernor) { mutableStateOf(isGovernor) }
     var showSourceInfo by remember { mutableStateOf(false) }
-    val lightCard = Color.White.copy(alpha = 0.94f)
+    val panel = LocalAppPalette.current
+    val lightCard = panel.surface.copy(alpha = if (darkMode) 0.97f else 0.94f)
     val captionSize = 12.sp
 
     ModalBottomSheet(
@@ -1566,14 +1671,14 @@ private fun ElectionOptionsSheet(
         onDismissRequest = onDismiss,
         modifier = Modifier.onSizeChanged { onSheetHeight(it.height.toFloat()) },
         shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp),
-        containerColor = Color(0xFFF6F8FC),
-        scrimColor = Color(0xFF172235).copy(alpha = 0.13f),
+        containerColor = panel.sheet,
+        scrimColor = Color.Black.copy(alpha = if (darkMode) 0.52f else 0.13f),
         dragHandle = {
             Box(
                 Modifier.padding(top = 12.dp, bottom = 8.dp)
                     .size(width = 38.dp, height = 4.dp)
                     .clip(RoundedCornerShape(100.dp))
-                    .background(Color(0xFFBBC4D1))
+                    .background(if (darkMode) panel.secondary else Color(0xFFBBC4D1))
             )
         }
     ) {
@@ -1695,6 +1800,29 @@ private fun ElectionOptionsSheet(
                         Text("Autorize as notificações nas configurações do Android.",
                             fontSize = 12.sp, color = Vermelho)
                     }
+                }
+            }
+
+            Surface(shape = RoundedCornerShape(22.dp), color = lightCard,
+                border = BorderStroke(1.dp, Borda)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 13.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("APARÊNCIA", fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold, letterSpacing = 1.sp,
+                            color = Secundario)
+                        Text("Modo escuro", color = Tinta,
+                            fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Text("Adaptar cores, gráficos, mapa e navegação",
+                            fontSize = captionSize, color = Secundario)
+                    }
+                    Switch(
+                        checked = darkMode,
+                        onCheckedChange = onDarkModeChange,
+                        colors = SwitchDefaults.colors(checkedTrackColor = Azul)
+                    )
                 }
             }
 
@@ -1918,20 +2046,24 @@ private fun GlassNavigationPill(
     modifier: Modifier = Modifier
 ) {
     val shape = RoundedCornerShape(100.dp)
-    val glassStyle = remember {
+    val glass = LocalAppPalette.current
+    val glassStyle = remember(glass) {
         HazeBlurStyle {
             blurRadius(17.dp)
             noiseFactor(0.035f)
-            colorEffects(listOf(HazeColorEffect.tint(Color.White.copy(alpha = 0.64f))))
-            fallbackColorEffect(HazeColorEffect.tint(Color.White.copy(alpha = 0.93f)))
+            colorEffects(listOf(HazeColorEffect.tint(glass.glassTint)))
+            fallbackColorEffect(HazeColorEffect.tint(glass.glassFallback))
         }
     }
     BoxWithConstraints(
         modifier = modifier.height(66.dp).shadow(16.dp, shape, clip = false)
             .clip(shape)
             .hazeBlur(input = HazeInput.Sources(hazeState), style = glassStyle)
-            .background(Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.20f), Color.White.copy(alpha = 0.05f))))
-            .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.85f)), shape)
+            .background(Brush.verticalGradient(listOf(
+                glass.surface.copy(alpha = 0.32f),
+                glass.surface.copy(alpha = 0.08f)
+            )))
+            .border(BorderStroke(1.dp, glass.glassBorder), shape)
     ) {
         val inset = 5.dp
         val widthPerItem = (maxWidth - inset * 2) / 6
@@ -1951,7 +2083,7 @@ private fun GlassNavigationPill(
                 .background(Brush.verticalGradient(listOf(
                     Azul.copy(alpha = 0.16f), Azul.copy(alpha = 0.07f)
                 )))
-                .border(1.dp, Color.White.copy(alpha = 0.74f), RoundedCornerShape(30.dp))
+                .border(1.dp, glass.glassBorder, RoundedCornerShape(30.dp))
         )
         Row(
             modifier = Modifier.fillMaxSize().padding(horizontal = inset),
@@ -1973,11 +2105,12 @@ private fun GlassNavigationPill(
                     .semantics { contentDescription = "Abrir opções da apuração" },
                 contentAlignment = Alignment.Center
             ) {
+                val menuDotColor = Tinta
                 Canvas(Modifier.size(22.dp)) {
                     val x = size.width / 2f
                     val centerY = size.height / 2f
                     for (step in -1..1) {
-                        drawCircle(color = Tinta, radius = size.width * 0.068f,
+                        drawCircle(color = menuDotColor, radius = size.width * 0.068f,
                             center = Offset(x, centerY + step * size.height * 0.26f))
                     }
                 }
@@ -2099,7 +2232,7 @@ private fun ContentColumn(modifier: Modifier = Modifier, content: @Composable Co
 private fun SurfaceCard(content: @Composable ColumnScope.() -> Unit) {
     Card(
         shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, Borda),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         modifier = Modifier.fillMaxWidth()
@@ -2111,12 +2244,14 @@ private fun SurfaceCard(content: @Composable ColumnScope.() -> Unit) {
 @Composable
 private fun Note(message: String) {
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFFFFF8E9)).padding(12.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .background(LocalAppPalette.current.noticeBackground).padding(12.dp),
         horizontalArrangement = Arrangement.spacedBy(9.dp),
         verticalAlignment = Alignment.Top
     ) {
         Text("ⓘ", fontSize = 18.sp, color = Aviso)
-        Text(message, fontSize = 12.sp, color = Color(0xFF725016), lineHeight = 17.sp)
+        Text(message, fontSize = 12.sp,
+            color = LocalAppPalette.current.noticeText, lineHeight = 17.sp)
     }
 }
 
@@ -2138,7 +2273,7 @@ private fun RatioBar(a: Double, b: Double, modifier: Modifier = Modifier, thickn
     val proportion = if (sum > 0) (a / sum).toFloat().coerceIn(0f, 1f) else 0f
     Row(
         modifier.fillMaxWidth().height(thickness.dp).clip(RoundedCornerShape(99.dp))
-            .background(Color(0xFFE7EBF0)),
+            .background(LocalAppPalette.current.track),
         horizontalArrangement = Arrangement.spacedBy(if (sum > 0 && a > 0 && b > 0) 2.dp else 0.dp)
     ) {
         if (sum > 0) {
@@ -2243,7 +2378,7 @@ private fun OfficialDashboard(
                 LinearProgressIndicator(
                     progress = { (validOfficial.sectionsPercent / 100).toFloat().coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(99.dp)),
-                    color = Azul, trackColor = Color(0xFFE8EDF4)
+                    color = Azul, trackColor = LocalAppPalette.current.track
                 )
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     CandidateInfo(candidateA, validOfficial.candidate22.toDouble(),
@@ -2307,7 +2442,7 @@ private fun OfficialDashboard(
 
 @Composable
 private fun MiniStat(label: String, value: String, modifier: Modifier) {
-    Card(modifier, colors = CardDefaults.cardColors(containerColor = Color.White), border = BorderStroke(1.dp, Borda), shape = RoundedCornerShape(14.dp)) {
+    Card(modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, Borda), shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Text(label, fontSize = 12.sp, color = Secundario)
             Text(value, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Tinta, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -2390,7 +2525,7 @@ private fun OfficialRegions(
                 LinearProgressIndicator(
                     progress = { (report.sectionsPercent / 100).toFloat().coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(99.dp)),
-                    color = Azul, trackColor = Color(0xFFE8EDF4)
+                    color = Azul, trackColor = LocalAppPalette.current.track
                 )
                 if (report.hasVotes) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -2503,12 +2638,12 @@ private fun GovernorRatioBar(report: GovernorReport) {
     val second = report.candidates.getOrNull(1)?.votes?.toDouble() ?: 0.0
     val total = first + second
     Row(Modifier.fillMaxWidth().height(12.dp).clip(RoundedCornerShape(99.dp))
-        .background(Color(0xFFE7EBF0)), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        .background(LocalAppPalette.current.track), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         if (total > 0.0) {
             if (first > 0.0) Box(Modifier.weight((first / total).toFloat().coerceAtLeast(.0001f))
-                .fillMaxHeight().background(GOVERNOR_BLUE))
+                .fillMaxHeight().background(GovernorBlue))
             if (second > 0.0) Box(Modifier.weight((second / total).toFloat().coerceAtLeast(.0001f))
-                .fillMaxHeight().background(GOVERNOR_PURPLE))
+                .fillMaxHeight().background(GovernorPurple))
         }
     }
 }
@@ -2525,12 +2660,12 @@ private fun GovernorDetailCards(report: GovernorReport?) {
             LinearProgressIndicator(
                 progress = { (report.sectionsPercent / 100).toFloat().coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(99.dp)),
-                color = Azul, trackColor = Color(0xFFE8EDF4)
+                color = Azul, trackColor = LocalAppPalette.current.track
             )
             if (report.hasVotes) {
                 report.candidates.forEachIndexed { index, candidate ->
                     GovernorCandidateRow(candidate, report.validVotes,
-                        if (index == 0) GOVERNOR_BLUE else GOVERNOR_PURPLE)
+                        if (index == 0) GovernorBlue else GovernorPurple)
                 }
                 GovernorRatioBar(report)
             } else {
@@ -2550,7 +2685,7 @@ private fun GovernorProjectionsCard(report: GovernorReport?) {
         if (report?.hasVotes == true) {
             report.candidates.forEachIndexed { index, c ->
                 GovernorCandidateRow(c, report.validVotes,
-                    if (index == 0) GOVERNOR_BLUE else GOVERNOR_PURPLE,
+                    if (index == 0) GovernorBlue else GovernorPurple,
                     projected = report.projected[index])
             }
             SummaryLine("Votos válidos projetados", count(report.projected.sum()))
@@ -2679,7 +2814,7 @@ private fun GovernorMap(
             Text("$active / 6 estados com votos", fontSize = 13.sp, color = Secundario)
             BrazilStateMap(geometry, colors, selected,
                 onSelected = { uf -> if (uf in GOVERNOR_UFS) onSelect(uf) },
-                colorA = GOVERNOR_BLUE, colorB = GOVERNOR_PURPLE)
+                colorA = GovernorBlue, colorB = GovernorPurple)
             Text("Azul e roxo representam o primeiro e o segundo candidato por número eleitoral em cada estado.",
                 fontSize = 12.sp, color = Secundario)
             Text("Cinza = sem disputa estadual ou sem votos disponíveis.", fontSize = 12.sp, color = Secundario)
@@ -2691,7 +2826,7 @@ private fun GovernorMap(
                 Text("${percentage(report.sectionsPercent)} das seções totalizadas", fontSize = 13.sp)
                 report.candidates.forEachIndexed { index, c ->
                     GovernorCandidateRow(c, report.validVotes,
-                        if (index == 0) GOVERNOR_BLUE else GOVERNOR_PURPLE)
+                        if (index == 0) GovernorBlue else GovernorPurple)
                 }
                 if (report.hasVotes) GovernorRatioBar(report)
             } else Text("Aguardando dados oficiais desta UF.", color = Secundario)
@@ -2818,8 +2953,8 @@ private fun ProjectionPercentNumber(name: String, value: Double, tint: Color, mo
             Text(name, fontSize = 12.sp, fontWeight = FontWeight.Medium,
                 maxLines = 2, color = Tinta, overflow = TextOverflow.Ellipsis)
         }
-        // Percentuais sempre pretos; verde/vermelho identificam as séries.
-        Text(percentage(value), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+        // Percentuais ficam em alto contraste: escuros no tema claro e claros no tema escuro.
+        Text(percentage(value), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tinta)
     }
 }
 
@@ -2848,6 +2983,8 @@ private fun ProjectionPercentChart(
                     Text(label, fontSize = 10.sp, color = Secundario)
                 }
             }
+            val gridLineColor = Borda
+            val markerFill = LocalAppPalette.current.surface
             Canvas(Modifier.weight(1f).fillMaxHeight()) {
                 val insetTop = 7.dp.toPx()
                 val insetBottom = 7.dp.toPx()
@@ -2864,7 +3001,7 @@ private fun ProjectionPercentChart(
                 // Eixo fixo 0–100%: não exagera visualmente variações pequenas.
                 listOf(0.0, 25.0, 50.0, 75.0, 100.0).forEach { tick ->
                     val py = y(tick)
-                    drawLine(Borda, Offset(0f, py), Offset(graphWidth, py),
+                    drawLine(gridLineColor, Offset(0f, py), Offset(graphWidth, py),
                         strokeWidth = 1.dp.toPx())
                 }
                 fun plot(tint: Color, getValue: (ProjectionPercentPoint) -> Double) {
@@ -2880,7 +3017,7 @@ private fun ProjectionPercentChart(
                     }
                     val lastIndex = points.lastIndex
                     val marker = Offset(x(lastIndex), y(getValue(points[lastIndex])))
-                    drawCircle(Color.White, radius = 5.4.dp.toPx(), center = marker)
+                    drawCircle(markerFill, radius = 5.4.dp.toPx(), center = marker)
                     drawCircle(tint, radius = 3.4.dp.toPx(), center = marker)
                 }
                 plot(colorA) { it.a }
@@ -2959,8 +3096,9 @@ private fun insidePolygon(point: Offset, polygon: List<Offset>): Boolean {
     return inside
 }
 
-private fun mapColor(result: Estimate, first: Color = Verde, second: Color = Vermelho): Color {
-    if (!result.valid || result.validos <= 0) return Color(0xFFE2E7ED)
+private fun mapColor(result: Estimate, first: Color = Verde, second: Color = Vermelho,
+                     missing: Color = Color(0xFFE2E7ED)): Color {
+    if (!result.valid || result.validos <= 0) return missing
     val shareA = (result.a / result.validos).toFloat().coerceIn(0f, 1f)
     return lerp(second, first, shareA)
 }
@@ -2974,10 +3112,12 @@ private fun BrazilStateMap(
     colorA: Color = Verde,
     colorB: Color = Vermelho
 ) {
+    val mapPalette = LocalAppPalette.current
+    val mapSelectedBorder = Azul
     Canvas(
         modifier = Modifier.fillMaxWidth().aspectRatio(1f)
             .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xFFF9FBFD))
+            .background(mapPalette.mapBackground)
             .pointerInput(geometry) {
                 detectTapGestures { tap ->
                     val square = min(size.width, size.height).toFloat() * 0.95f
@@ -3004,10 +3144,11 @@ private fun BrazilStateMap(
                 if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
             path.close()
-            drawPath(path, color = mapColor(estimates.getValue(state.uf), colorA, colorB))
+            drawPath(path, color = mapColor(estimates.getValue(state.uf), colorA, colorB,
+                mapPalette.emptyState))
             drawPath(
                 path,
-                color = if (selected == state.uf) Azul else Color.White,
+                color = if (selected == state.uf) mapSelectedBorder else mapPalette.border,
                 style = Stroke(width = if (selected == state.uf) 2.8.dp.toPx() else 1.dp.toPx())
             )
         }
@@ -3057,7 +3198,7 @@ private fun MapPage(
                 Text("100% $candidateA", fontSize = 11.sp, color = Tinta)
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Box(Modifier.size(11.dp).background(Color(0xFFE2E7ED), RoundedCornerShape(3.dp)))
+                Box(Modifier.size(11.dp).background(LocalAppPalette.current.emptyState, RoundedCornerShape(3.dp)))
                 Text("Cinza = sem votos oficiais disponíveis", fontSize = 12.sp, color = Secundario)
             }
         }
@@ -3081,7 +3222,7 @@ private fun MapPage(
                 progress = { (current.urnas / 100).toFloat().coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(99.dp)),
                 color = Azul,
-                trackColor = Color(0xFFE8EDF4)
+                trackColor = LocalAppPalette.current.track
             )
             if (current.valid) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
