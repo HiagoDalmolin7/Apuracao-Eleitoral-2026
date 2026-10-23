@@ -106,6 +106,12 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
+import dev.chrisbanes.haze.blur.hazeBlur
+import dev.chrisbanes.haze.blur.HazeBlurStyle
+import dev.chrisbanes.haze.blur.HazeColorEffect
 
 // Cores identificadoras dos candidatos. Números e percentuais permanecem pretos.
 private val Verde = Color(0xFF198754)
@@ -935,7 +941,8 @@ private fun ElectionApp() {
     }
     LaunchedEffect(tab, electionMode) { chromeVisible = 1f }
     // O blur segue a posição real da folha modal, inclusive quando arrastada para fechar.
-    // O dock usa materiais Compose sem dependências externas de Kotlin.
+    // Efeito vidro nativo: o conteúdo por trás da pílula vira fonte de blur.
+    val dockHazeState = rememberHazeState()
     val optionsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val sheetScope = rememberCoroutineScope()
     var sheetHeightPx by remember { mutableFloatStateOf(0f) }
@@ -1332,7 +1339,7 @@ private fun ElectionApp() {
             // Dissolução discreta do conteúdo nas extremidades. Conforme as barras
             // recolhem, o efeito aumenta e mantém os ícones do sistema legíveis.
             Box(Modifier.fillMaxSize()) {
-            Box(Modifier.fillMaxSize().drawWithContent {
+            Box(Modifier.fillMaxSize().hazeSource(dockHazeState).drawWithContent {
                 drawContent()
                 val opacity = (1f - chromeVisible) * 0.93f
                 if (opacity > 0.01f) {
@@ -1515,7 +1522,8 @@ private fun ElectionApp() {
                         },
                         modifier = Modifier.align(Alignment.BottomCenter)
                             .fillMaxWidth()
-                            .padding(start = 15.dp, end = 15.dp, bottom = navInset + 8.dp)
+                            .padding(start = 15.dp, end = 15.dp, bottom = navInset + 8.dp),
+                        hazeState = dockHazeState
                     )
                 }
             }
@@ -1545,81 +1553,104 @@ private fun ElectionOptionsSheet(
     onNotificationChange: (Boolean) -> Unit,
     onRefresh: () -> Unit
 ) {
+    // Menu compacto: escolhas frequentes no topo, estados sob demanda, status ao final.
+    // Os valores são sempre recebidos da tela principal, evitando duplicar estados.
+    val isGovernor = electionMode == "governador"
+    var showGovernorList by remember(isGovernor) { mutableStateOf(isGovernor) }
+    var showSourceInfo by remember { mutableStateOf(false) }
+    val lightCard = Color.White.copy(alpha = 0.94f)
+    val captionSize = 12.sp
+
     ModalBottomSheet(
         sheetState = sheetState,
         onDismissRequest = onDismiss,
         modifier = Modifier.onSizeChanged { onSheetHeight(it.height.toFloat()) },
-        shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
-        containerColor = Color(0xFFF7F9FC),
-        // O scrim acompanha a transição do BottomSheet; o blur usa o mesmo offset.
-        scrimColor = Color(0xFF172235).copy(alpha = 0.12f),
-        dragHandle = { BottomSheetDefaults.DragHandle() }
+        shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp),
+        containerColor = Color(0xFFF6F8FC),
+        scrimColor = Color(0xFF172235).copy(alpha = 0.13f),
+        dragHandle = {
+            Box(
+                Modifier.padding(top = 12.dp, bottom = 8.dp)
+                    .size(width = 38.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(100.dp))
+                    .background(Color(0xFFBBC4D1))
+            )
+        }
     ) {
         Column(
-            modifier = Modifier.fillMaxWidth().heightIn(max = 690.dp)
+            modifier = Modifier.fillMaxWidth()
+                .heightIn(max = 650.dp)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp)
+                .padding(horizontal = 18.dp)
                 .padding(bottom = 26.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("Opções da apuração", color = Tinta, fontSize = 21.sp, fontWeight = FontWeight.Bold)
-                    Text("Personalize a eleição e a atualização dos dados",
-                        fontSize = 12.sp, color = Secundario)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("Opções", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = Tinta)
+                    Text(
+                        if (isGovernor) "Governador • $selectedGovernor • fonte TSE"
+                        else "Presidente • Brasil • ${if (automatic) "TSE" else "Manual"}",
+                        fontSize = captionSize, color = Secundario
+                    )
                 }
-                TextButton(onClick = onDismiss) { Text("Concluir", color = Azul) }
+                TextButton(onClick = onDismiss) {
+                    Text("Fechar", color = Azul, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
             }
 
-            Surface(shape = RoundedCornerShape(18.dp), color = Color.White,
+            Surface(shape = RoundedCornerShape(22.dp), color = lightCard,
                 border = BorderStroke(1.dp, Borda)) {
-                Column(Modifier.fillMaxWidth().padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("ELEIÇÃO", fontSize = 11.sp, fontWeight = FontWeight.Bold,
-                        color = Secundario, letterSpacing = 1.sp)
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (electionMode == "presidente") {
+                Column(Modifier.fillMaxWidth().padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("ACOMPANHAR ELEIÇÃO", fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold, letterSpacing = 1.sp, color = Secundario)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                        if (!isGovernor) {
                             Button(onClick = onPresident, modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(11.dp), contentPadding = PaddingValues(horizontal = 6.dp)) {
-                                Text("Presidente", maxLines = 1, fontSize = 13.sp)
+                                shape = RoundedCornerShape(15.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                Text("Presidente", fontSize = 13.sp, maxLines = 1)
                             }
                         } else {
                             OutlinedButton(onClick = onPresident, modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(11.dp), contentPadding = PaddingValues(horizontal = 6.dp)) {
-                                Text("Presidente", maxLines = 1, fontSize = 13.sp)
+                                shape = RoundedCornerShape(15.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                Text("Presidente", fontSize = 13.sp, maxLines = 1)
                             }
                         }
-                        if (electionMode == "governador") {
-                            Button(onClick = { onGovernor(selectedGovernor) }, modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(11.dp), contentPadding = PaddingValues(horizontal = 6.dp)) {
-                                Text("Governador", maxLines = 1, fontSize = 13.sp)
+                        if (isGovernor) {
+                            Button(onClick = { showGovernorList = !showGovernorList },
+                                modifier = Modifier.weight(1f), shape = RoundedCornerShape(15.dp),
+                                contentPadding = PaddingValues(horizontal = 6.dp)) {
+                                Text("Governador $selectedGovernor", fontSize = 12.sp, maxLines = 1)
                             }
                         } else {
-                            OutlinedButton(onClick = { onGovernor(selectedGovernor) }, modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(11.dp), contentPadding = PaddingValues(horizontal = 6.dp)) {
-                                Text("Governador", maxLines = 1, fontSize = 13.sp)
+                            OutlinedButton(onClick = {
+                                showGovernorList = true
+                                onGovernor(selectedGovernor)
+                            }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(15.dp),
+                                contentPadding = PaddingValues(horizontal = 6.dp)) {
+                                Text("Governador", fontSize = 13.sp, maxLines = 1)
                             }
                         }
                     }
-                    if (electionMode == "governador") {
+                    if (isGovernor && showGovernorList) {
                         HorizontalDivider(color = Borda)
-                        Text("Segundo turno por estado", fontSize = 12.sp, color = Secundario)
-                        GOVERNOR_UFS.chunked(3).forEach { group ->
+                        Text("Escolha o estado", color = Secundario, fontSize = 12.sp)
+                        GOVERNOR_UFS.chunked(3).forEach { row ->
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                group.forEach { uf ->
-                                    if (uf == selectedGovernor) {
-                                        Button(onClick = { onGovernor(uf) }, modifier = Modifier.weight(1f),
-                                            shape = RoundedCornerShape(10.dp),
-                                            contentPadding = PaddingValues(horizontal = 2.dp)) {
-                                            Text(uf, fontSize = 13.sp)
-                                        }
-                                    } else {
-                                        OutlinedButton(onClick = { onGovernor(uf) }, modifier = Modifier.weight(1f),
-                                            shape = RoundedCornerShape(10.dp),
-                                            contentPadding = PaddingValues(horizontal = 2.dp)) {
-                                            Text(uf, fontSize = 13.sp)
-                                        }
-                                    }
+                                row.forEach { uf ->
+                                    FilterChip(
+                                        selected = selectedGovernor == uf,
+                                        onClick = { onGovernor(uf) },
+                                        label = {
+                                            Text(uf, modifier = Modifier.fillMaxWidth(),
+                                                fontSize = 13.sp, textAlign = TextAlign.Center)
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(13.dp)
+                                    )
                                 }
                             }
                         }
@@ -1627,68 +1658,85 @@ private fun ElectionOptionsSheet(
                 }
             }
 
-            Surface(shape = RoundedCornerShape(18.dp), color = Color.White,
+            Surface(shape = RoundedCornerShape(22.dp), color = lightCard,
                 border = BorderStroke(1.dp, Borda)) {
-                Column(Modifier.fillMaxWidth().padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(13.dp)) {
-                    Text("PREFERÊNCIAS", fontSize = 11.sp, fontWeight = FontWeight.Bold,
-                        color = Secundario, letterSpacing = 1.sp)
-                    if (electionMode == "presidente") {
-                        Row(verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 13.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("DADOS E ALERTAS", fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold, letterSpacing = 1.sp, color = Secundario)
+                    if (!isGovernor) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text("Dados automáticos do TSE", fontSize = 14.sp,
-                                    fontWeight = FontWeight.SemiBold, color = Tinta)
-                                Text(if (automatic) "Fonte oficial selecionada" else "Digitação manual habilitada",
-                                    fontSize = 11.sp, color = Secundario)
+                                Text("Atualização automática", color = Tinta,
+                                    fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                Text(if (automatic) "Resultados oficiais do TSE" else "Preenchimento manual",
+                                    fontSize = captionSize, color = Secundario)
                             }
                             Switch(checked = automatic, onCheckedChange = onAutomaticChange,
                                 colors = SwitchDefaults.colors(checkedTrackColor = Azul))
                         }
                         HorizontalDivider(color = Borda)
                     } else {
-                        Text("Governadores: dados oficiais do TSE, sem preenchimento manual.",
-                            fontSize = 12.sp, color = Secundario)
+                        Text("A apuração de governador usa os resultados oficiais do TSE.",
+                            fontSize = captionSize, color = Secundario)
                         HorizontalDivider(color = Borda)
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text("Notificação da projeção", fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold, color = Tinta)
-                            Text("Acompanhar em segundo plano", fontSize = 11.sp, color = Secundario)
+                            Text("Notificação da projeção", color = Tinta,
+                                fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                            Text("Atualizações com o app em segundo plano",
+                                fontSize = captionSize, color = Secundario)
                         }
                         Switch(checked = notificationEnabled, onCheckedChange = onNotificationChange,
                             colors = SwitchDefaults.colors(checkedTrackColor = Azul))
                     }
                     if (notificationError) {
-                        Text("Para ativar, permita as notificações nas configurações do Android.",
-                            fontSize = 11.sp, color = Vermelho)
+                        Text("Autorize as notificações nas configurações do Android.",
+                            fontSize = 12.sp, color = Vermelho)
                     }
                 }
             }
 
-            Surface(shape = RoundedCornerShape(18.dp), color = Color.White,
+            Surface(shape = RoundedCornerShape(22.dp), color = lightCard,
                 border = BorderStroke(1.dp, Borda)) {
-                Column(Modifier.fillMaxWidth().padding(16.dp),
+                Column(Modifier.fillMaxWidth().padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("SINCRONIZAÇÃO", fontSize = 11.sp, fontWeight = FontWeight.Bold,
-                        color = Secundario, letterSpacing = 1.sp)
-                    Text(status, fontSize = 12.sp, color = Secundario)
-                    if (electionMode == "governador" || automatic) {
-                        OutlinedButton(onClick = onRefresh, shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth()) {
-                            Text("↻  Atualizar dados agora", color = Azul, fontSize = 13.sp)
+                    Text("SINCRONIZAÇÃO", fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold, letterSpacing = 1.sp, color = Secundario)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(Modifier.size(8.dp).clip(CircleShape).background(
+                            if (isGovernor || automatic) Verde else Azul))
+                        Text(status, fontSize = captionSize, color = Secundario,
+                            modifier = Modifier.weight(1f))
+                    }
+                    if (isGovernor || automatic) {
+                        Button(onClick = onRefresh, modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp)) {
+                            Text("Atualizar agora", fontSize = 13.sp)
                         }
                     } else {
-                        Text("Os dados manuais são salvos automaticamente no celular.",
-                            fontSize = 12.sp, color = Secundario)
+                        Text("Seus dados manuais são salvos automaticamente neste aparelho.",
+                            fontSize = captionSize, color = Secundario)
                     }
                 }
             }
-            Text("Aplicativo independente • Resultados oficiais do TSE e projeções matemáticas não oficiais.",
-                fontSize = 11.sp, color = Secundario, textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth())
+
+            TextButton(onClick = { showSourceInfo = !showSourceInfo },
+                modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                Text(if (showSourceInfo) "Ocultar informações" else "Sobre os dados e projeções",
+                    fontSize = 12.sp, color = Secundario)
+            }
+            if (showSourceInfo) {
+                Text(
+                    "Aplicativo independente, sem vínculo oficial com o TSE. " +
+                        "Os votos publicados pelo TSE são resultados oficiais; " +
+                        "as projeções são estimativas matemáticas não oficiais.",
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                    fontSize = 12.sp, textAlign = TextAlign.Center, color = Secundario
+                )
+            }
         }
     }
 }
@@ -1860,26 +1908,30 @@ private fun ManualStatistics(modifier: Modifier, states: Map<String, StateData>,
 }
 
 // Pílula flutuante: cinco destinos e o menu de configurações na sexta posição.
-// Material translúcido sem Haze: preserva a aparência de vidro com compatibilidade Kotlin 2.2.
+// O fundo realmente desfoca o conteúdo marcado como hazeSource atrás da navegação.
 @Composable
 private fun GlassNavigationPill(
     selected: Int,
     onTabSelected: (Int) -> Unit,
     onSettings: () -> Unit,
+    hazeState: dev.chrisbanes.haze.HazeState,
     modifier: Modifier = Modifier
 ) {
     val shape = RoundedCornerShape(100.dp)
+    val glassStyle = remember {
+        HazeBlurStyle {
+            blurRadius(17.dp)
+            noiseFactor(0.035f)
+            colorEffects(listOf(HazeColorEffect.tint(Color.White.copy(alpha = 0.64f))))
+            fallbackColorEffect(HazeColorEffect.tint(Color.White.copy(alpha = 0.93f)))
+        }
+    }
     BoxWithConstraints(
-        modifier = modifier.height(66.dp)
-            .shadow(16.dp, shape, clip = false)
+        modifier = modifier.height(66.dp).shadow(16.dp, shape, clip = false)
             .clip(shape)
-            // Painel translúcido: cores e cartões atrás permanecem sutilmente visíveis.
-            // Não usar Modifier.blur aqui: isso desfocaria os ÍCONES e o texto da navegação.
-            .background(Color.White.copy(alpha = 0.86f))
-            .background(Brush.verticalGradient(
-                listOf(Color.White.copy(alpha = 0.34f), Color(0xFFE9F1FF).copy(alpha = 0.16f))
-            ))
-            .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.96f)), shape)
+            .hazeBlur(input = HazeInput.Sources(hazeState), style = glassStyle)
+            .background(Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.20f), Color.White.copy(alpha = 0.05f))))
+            .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.85f)), shape)
     ) {
         val inset = 5.dp
         val widthPerItem = (maxWidth - inset * 2) / 6
