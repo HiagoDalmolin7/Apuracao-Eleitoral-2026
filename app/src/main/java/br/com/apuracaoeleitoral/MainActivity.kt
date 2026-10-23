@@ -151,8 +151,8 @@ private val LightPalette = AppPalette(
     noticeBackground = Color(0xFFFFF8E9),
     noticeText = Color(0xFF725016),
     track = Color(0xFFE7EBF0),
-    mapBackground = Color(0xFFF9FBFD),
-    emptyState = Color(0xFFE2E7ED),
+    mapBackground = Color(0xFFEDF2F8),
+    emptyState = Color(0xFFD8E2ED),
     governorBlue = Color(0xFF245AA6),
     governorPurple = Color(0xFF9055A2),
     glassTint = Color.White.copy(alpha = 0.64f),
@@ -660,7 +660,22 @@ private fun governorEvolution(report: GovernorReport, moment: Long): EvolutionPo
 private fun clockTime(whenMs: Long): String = if (whenMs <= 0L) "—"
     else SimpleDateFormat("dd/MM HH:mm:ss", PtBr).format(Date(whenMs))
 
-private fun nameForRegion(uf: String): String = if (uf == "ZZ") "Exterior (ZZ)" else uf
+private fun nameForRegion(uf: String): String = if (uf == "ZZ") "Exterior" else uf
+
+// Siglas ficam nos seletores compactos; a lista de escolha mostra nomes completos.
+private val REGION_FULL_NAMES = mapOf(
+    "AC" to "Acre", "AL" to "Alagoas", "AP" to "Amapá",
+    "AM" to "Amazonas", "BA" to "Bahia", "CE" to "Ceará",
+    "DF" to "Distrito Federal", "ES" to "Espírito Santo", "GO" to "Goiás",
+    "MA" to "Maranhão", "MT" to "Mato Grosso", "MS" to "Mato Grosso do Sul",
+    "MG" to "Minas Gerais", "PA" to "Pará", "PB" to "Paraíba",
+    "PR" to "Paraná", "PE" to "Pernambuco", "PI" to "Piauí",
+    "RJ" to "Rio de Janeiro", "RN" to "Rio Grande do Norte",
+    "RS" to "Rio Grande do Sul", "RO" to "Rondônia", "RR" to "Roraima",
+    "SC" to "Santa Catarina", "SP" to "São Paulo", "SE" to "Sergipe",
+    "TO" to "Tocantins", "ZZ" to "Exterior"
+)
+private fun fullRegionName(uf: String): String = REGION_FULL_NAMES[uf] ?: uf
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1029,6 +1044,8 @@ private fun ElectionApp() {
     // A posição permanece estável mesmo durante gestos rápidos e mudanças de layout.
     var windowHeightPx by remember { mutableFloatStateOf(0f) }
     var sheetDragPx by remember { mutableFloatStateOf(0f) }
+    var sheetGesturePx by remember { mutableFloatStateOf(0f) }
+    var sheetExpandedToTop by remember { mutableStateOf(false) }
     var closingOptions by remember { mutableStateOf(false) }
     val sheetReveal by remember(showOptions, optionsSheetState) {
         derivedStateOf {
@@ -1058,24 +1075,33 @@ private fun ElectionApp() {
             } finally {
                 showOptions = false
                 sheetDragPx = 0f
+                sheetGesturePx = 0f
+                sheetExpandedToTop = false
                 closingOptions = false
             }
         }
     }
     fun finishSheetDrag() {
-        if (sheetDragPx > with(density) { 68.dp.toPx() }) {
-            dismissOptions()
-        } else {
+        val upThreshold = with(density) { 48.dp.toPx() }
+        val downThreshold = with(density) { 68.dp.toPx() }
+        when {
+            sheetGesturePx < -upThreshold && !sheetExpandedToTop -> sheetExpandedToTop = true
+            sheetGesturePx > downThreshold && sheetExpandedToTop -> sheetExpandedToTop = false
+            sheetGesturePx > downThreshold -> dismissOptions()
+        }
+        sheetGesturePx = 0f
+        if (!closingOptions) {
             sheetScope.launch {
-                animate(sheetDragPx, 0f, animationSpec = tween(180)) { value, _ ->
+                animate(sheetDragPx, 0f, animationSpec = tween(170)) { value, _ ->
                     sheetDragPx = value
                 }
             }
         }
     }
     fun cancelSheetDrag() {
+        sheetGesturePx = 0f
         sheetScope.launch {
-            animate(sheetDragPx, 0f, animationSpec = tween(180)) { value, _ ->
+            animate(sheetDragPx, 0f, animationSpec = tween(170)) { value, _ ->
                 sheetDragPx = value
             }
         }
@@ -1381,10 +1407,13 @@ private fun ElectionApp() {
                 sheetState = optionsSheetState,
                 onSheetHeight = { sheetHeightPx = it },
                 dragOffsetPx = sheetDragPx,
+                expandedToTop = sheetExpandedToTop,
                 onDragBy = { delta ->
-                    // Aceitar apenas o gesto para baixo na alça; gestos para cima
-                    // continuam rolando o conteúdo sem puxar a folha modal.
-                    sheetDragPx = (sheetDragPx + delta).coerceIn(0f, sheetHeightPx * 0.85f)
+                    // Drag para cima amplia a folha; para baixo recolhe ou fecha.
+                    // A rolagem da lista abaixo é independente deste detector.
+                    sheetGesturePx = (sheetGesturePx + delta)
+                        .coerceIn(-with(density) { 120.dp.toPx() }, sheetHeightPx * 0.85f)
+                    sheetDragPx = sheetGesturePx.coerceAtLeast(0f)
                 },
                 onDragFinished = { finishSheetDrag() },
                 onDragCancelled = { cancelSheetDrag() },
@@ -1714,6 +1743,7 @@ private fun ElectionOptionsSheet(
     sheetState: SheetState,
     onSheetHeight: (Float) -> Unit,
     dragOffsetPx: Float,
+    expandedToTop: Boolean,
     onDragBy: (Float) -> Unit,
     onDragFinished: () -> Unit,
     onDragCancelled: () -> Unit,
@@ -1785,13 +1815,20 @@ private fun ElectionOptionsSheet(
             }
         }
     ) {
+        val screenHeight = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp
+        // Compacto ao abrir; ao deslizar o cabeçalho para cima, ocupa a área útil
+        // perto da status bar, sem cortá-la nem fazer o título desaparecer.
+        val nearFullHeight = (screenHeight - 30.dp).coerceAtLeast(300.dp)
+        val compactHeight = minOf(650.dp, nearFullHeight)
+        val animatedSheetHeight by animateDpAsState(
+            targetValue = if (expandedToTop) nearFullHeight else compactHeight,
+            animationSpec = tween(durationMillis = 260),
+            label = "Altura da folha de opções"
+        )
         Column(
-            modifier = Modifier.fillMaxWidth()
-                .heightIn(max = 650.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 18.dp)
-                .padding(bottom = 26.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            modifier = Modifier.fillMaxWidth().height(animatedSheetHeight)
+                .padding(horizontal = 18.dp).padding(bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(Modifier.fillMaxWidth().then(dragGesture), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -1807,6 +1844,13 @@ private fun ElectionOptionsSheet(
                 }
             }
 
+            // O título e o botão Fechar ficam fixos; só as opções rolam.
+            HorizontalDivider(color = Borda)
+            Column(
+                modifier = Modifier.fillMaxWidth().weight(1f)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
             Surface(shape = RoundedCornerShape(22.dp), color = lightCard,
                 border = BorderStroke(1.dp, Borda)) {
                 Column(Modifier.fillMaxWidth().padding(14.dp),
@@ -1974,6 +2018,7 @@ private fun ElectionOptionsSheet(
                     fontSize = 12.sp, textAlign = TextAlign.Center, color = Secundario
                 )
             }
+            } // Conteúdo rolável: título permanece visível
         }
     }
 }
@@ -2010,7 +2055,7 @@ private fun ManualDashboard(
             )
         }
         SurfaceCard {
-            Text("Exterior (ZZ)", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            Text("Exterior", fontWeight = FontWeight.Bold, fontSize = 17.sp)
             val abroad = computed.getValue("ZZ")
             if (abroad.valid) {
                 SummaryLine(candidateA, count(abroad.a))
@@ -2032,6 +2077,112 @@ private fun ManualDashboard(
     }
 }
 
+// Seletor visual unificado: pílula sem seta e folha modal com nomes de estados por extenso.
+// O valor persistido continua sendo a sigla oficial (inclusive ZZ para Exterior).
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RegionPickerPill(
+    selected: String,
+    options: List<String>,
+    title: String,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    compact: Boolean = false,
+    descriptionFor: (String) -> String? = { null }
+) {
+    var pickerOpen by remember { mutableStateOf(false) }
+    val palette = LocalAppPalette.current
+    OutlinedButton(
+        onClick = { pickerOpen = true },
+        modifier = modifier.heightIn(min = 43.dp),
+        shape = RoundedCornerShape(50),
+        border = BorderStroke(1.dp, palette.border),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+    ) {
+        Text(
+            text = nameForRegion(selected),
+            modifier = if (compact) Modifier else Modifier.fillMaxWidth(),
+            textAlign = TextAlign.Center,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 15.sp,
+            maxLines = 1
+        )
+    }
+    if (pickerOpen) {
+        val pickerState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val pickerScope = rememberCoroutineScope()
+        var closingPicker by remember { mutableStateOf(false) }
+        fun dismissPicker() {
+            if (closingPicker) return
+            closingPicker = true
+            pickerScope.launch {
+                try {
+                    if (pickerState.isVisible) pickerState.hide()
+                } finally {
+                    pickerOpen = false
+                }
+            }
+        }
+        ModalBottomSheet(
+            sheetState = pickerState,
+            onDismissRequest = { dismissPicker() },
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            containerColor = palette.sheet,
+            scrimColor = Color.Black.copy(alpha = 0.25f)
+        ) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp)) {
+                Text(title, color = palette.text, fontWeight = FontWeight.Bold, fontSize = 22.sp)
+                Text("Selecione uma região", color = palette.secondary, fontSize = 12.sp)
+                Spacer(Modifier.height(12.dp))
+                androidx.compose.foundation.lazy.LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 545.dp),
+                    contentPadding = PaddingValues(bottom = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(options.size) { index ->
+                        val uf = options[index]
+                        val isSelected = uf == selected
+                        Surface(
+                            onClick = {
+                                onSelect(uf)
+                                dismissPicker()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            color = if (isSelected) palette.accent.copy(alpha = 0.13f)
+                                else palette.surface,
+                            border = BorderStroke(1.dp, if (isSelected) palette.accent.copy(alpha = 0.40f)
+                                else palette.border)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(fullRegionName(uf), color = palette.text,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        fontSize = 15.sp)
+                                    descriptionFor(uf)?.let { extra ->
+                                        Text(extra, color = palette.secondary, fontSize = 11.sp)
+                                    }
+                                }
+                                if (uf != "ZZ") {
+                                    Text(uf, color = palette.secondary, fontSize = 12.sp)
+                                }
+                                if (isSelected) {
+                                    Text("✓", color = palette.accent, fontSize = 18.sp,
+                                        fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ManualRegions(
     modifier: Modifier, candidateA: String, candidateB: String,
@@ -2039,28 +2190,22 @@ private fun ManualRegions(
     state: StateData, projection: Estimate,
     all: Map<String, StateData>, onUpdate: (StateData) -> Unit
 ) {
-    var expanded by remember { mutableStateOf(false) }
     var confirmReset by remember { mutableStateOf(false) }
     ContentColumn(modifier) {
         Text("Entrada manual", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text("Os campos são editáveis e salvos automaticamente no celular. O TSE não é consultado neste modo.", fontSize = 12.sp, color = Secundario)
         SurfaceCard {
             Text("Selecionar estado ou exterior", fontWeight = FontWeight.Medium)
-            Box {
-                OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-                    Text(nameForRegion(selected), modifier = Modifier.weight(1f), textAlign = TextAlign.Start)
-                    Text("⌄")
-                }
-                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    (UFS + "ZZ").forEach { region ->
-                        val hasValues = all[region]?.let { quantity(it.a) + quantity(it.b) > 0 } == true
-                        DropdownMenuItem(
-                            text = { Text(nameForRegion(region) + if (hasValues) " • preenchido" else "") },
-                            onClick = { onSelect(region); expanded = false }
-                        )
-                    }
-                }
-            }
+            RegionPickerPill(
+                selected = selected,
+                options = UFS + "ZZ",
+                title = "Selecionar estado ou exterior",
+                onSelect = onSelect,
+                descriptionFor = { region ->
+                    if (all[region]?.let { quantity(it.a) + quantity(it.b) > 0 } == true) "Preenchido" else null
+                },
+                modifier = Modifier.fillMaxWidth()
+            )
         }
         SurfaceCard {
             Text("Votos e apuração • ${nameForRegion(selected)}", fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -2523,7 +2668,7 @@ private fun OfficialDashboard(
                 fontSize = 12.sp, color = Secundario)
         }
         SurfaceCard {
-            Text("Exterior (ZZ)", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Text("Exterior", fontSize = 17.sp, fontWeight = FontWeight.Bold)
             if (exterior?.hasVotes == true) {
                 SummaryLine("Seções totalizadas", percentage(exterior.sectionsPercent))
                 SummaryLine(candidateA, count(exterior.candidate22.toDouble()))
@@ -2603,27 +2748,21 @@ private fun OfficialRegions(
     report: TseReport?, estimate: Estimate,
     all: Map<String, TseReport>, failures: Set<String>, status: String
 ) {
-    var expanded by remember { mutableStateOf(false) }
     ContentColumn(modifier) {
         Text("Apuração por região", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text("Dados importados automaticamente do TSE • 27 UFs e exterior", color = Secundario, fontSize = 12.sp)
         Text(status, color = Secundario, fontSize = 12.sp)
         SurfaceCard {
             Text("Escolher região", fontWeight = FontWeight.Medium)
-            Box {
-                OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-                    Text(nameForRegion(selected), modifier = Modifier.weight(1f), textAlign = TextAlign.Start)
-                    Text("⌄")
-                }
-                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    (UFS + "ZZ").forEach { region ->
-                        DropdownMenuItem(text = { Text(nameForRegion(region) +
-                            if (all[region]?.hasVotes == true) " • atualizado" else "") },
-                            onClick = { onSelect(region); expanded = false })
-                    }
-                }
-            }
-            if (selected == "ZZ") Text("Total do exterior: abrangência ZZ do TSE. Não há mapa por país.", fontSize = 12.sp, color = Secundario)
+            RegionPickerPill(
+                selected = selected,
+                options = UFS + "ZZ",
+                title = "Escolher região",
+                onSelect = onSelect,
+                descriptionFor = { region -> if (all[region]?.hasVotes == true) "Dados atualizados" else null },
+                modifier = Modifier.fillMaxWidth()
+            )
+            if (selected == "ZZ") Text("Total de votos do exterior. Não há mapa por país.", fontSize = 12.sp, color = Secundario)
         }
         SurfaceCard {
             Text(nameForRegion(selected), fontSize = 22.sp, fontWeight = FontWeight.Bold)
@@ -2707,7 +2846,7 @@ private fun OfficialStatistics(
                 SummaryLine("Nulos", count(exterior.nullVotes.toDouble()))
                 SummaryLine("Abstenções", count(exterior.abstentions.toDouble()))
             } else Text("Ainda sem votos publicados no exterior.", color = Secundario)
-            Text("Agregado oficial ZZ, sem mapa de países.", fontSize = 12.sp, color = Secundario)
+            Text("Total oficial do exterior, sem mapa de países.", fontSize = 12.sp, color = Secundario)
         }
         SurfaceCard {
             Text("Projeções matemáticas", fontSize = 17.sp, fontWeight = FontWeight.Bold)
@@ -2871,24 +3010,19 @@ private fun GovernorRegions(
     modifier: Modifier, selected: String, all: Map<String, GovernorReport>,
     status: String, failed: Set<String>, onSelect: (String) -> Unit
 ) {
-    var expanded by remember { mutableStateOf(false) }
     val report = all[selected]
     ContentColumn(modifier) {
         Text("Governadores • 2º turno", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text(status, fontSize = 12.sp, color = Secundario)
         SurfaceCard {
             Text("Estado ou Distrito Federal", fontWeight = FontWeight.SemiBold)
-            Box {
-                OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Governador — $selected", modifier = Modifier.weight(1f), textAlign = TextAlign.Start)
-                    Text("⌄")
-                }
-                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    GOVERNOR_UFS.forEach { uf ->
-                        DropdownMenuItem(text = { Text(uf) }, onClick = { onSelect(uf); expanded = false })
-                    }
-                }
-            }
+            RegionPickerPill(
+                selected = selected,
+                options = GOVERNOR_UFS,
+                title = "Selecionar governador",
+                onSelect = onSelect,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
         GovernorDetailCards(report)
         GovernorProjectionsCard(report)
@@ -3223,6 +3357,9 @@ private fun BrazilStateMap(
 ) {
     val mapPalette = LocalAppPalette.current
     val mapSelectedBorder = Azul
+    // Bordas de alto contraste: eram quase invisíveis sobre o fundo claro.
+    val mapOutline = if (mapPalette == DarkPalette) Color(0xFF6A7F9B)
+        else Color(0xFF69788C)
     Canvas(
         modifier = Modifier.fillMaxWidth().aspectRatio(1f)
             .clip(RoundedCornerShape(14.dp))
@@ -3257,8 +3394,8 @@ private fun BrazilStateMap(
                 mapPalette.emptyState))
             drawPath(
                 path,
-                color = if (selected == state.uf) mapSelectedBorder else mapPalette.border,
-                style = Stroke(width = if (selected == state.uf) 2.8.dp.toPx() else 1.dp.toPx())
+                color = if (selected == state.uf) mapSelectedBorder else mapOutline,
+                style = Stroke(width = if (selected == state.uf) 2.8.dp.toPx() else 1.15.dp.toPx())
             )
         }
     }
@@ -3274,7 +3411,6 @@ private fun MapPage(
 ) {
     val geometry = remember { readBrazilMap() }
     var picked by remember { mutableStateOf("SC") }
-    var expanded by remember { mutableStateOf(false) }
     val current = computed.getValue(picked)
     val reported = computed.values.count { it.valid }
     ContentColumn(modifier) {
@@ -3317,13 +3453,17 @@ private fun MapPage(
                     Text("Estado selecionado", fontSize = 12.sp, color = Secundario)
                     Text(picked, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 }
-                Box {
-                    OutlinedButton(onClick = { expanded = true }) { Text("Trocar UF  ⌄") }
-                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                        UFS.forEach { uf ->
-                            DropdownMenuItem(text = { Text(uf) }, onClick = { picked = uf; expanded = false })
-                        }
-                    }
+                Column(horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Trocar UF", fontSize = 12.sp, color = Secundario)
+                    RegionPickerPill(
+                        selected = picked,
+                        options = UFS,
+                        title = "Escolher UF no mapa",
+                        onSelect = { picked = it },
+                        compact = true,
+                        modifier = Modifier.widthIn(min = 94.dp, max = 110.dp)
+                    )
                 }
             }
             Text("Urnas apuradas: ${percentage(current.urnas)}", fontSize = 13.sp, color = Tinta, fontWeight = FontWeight.Medium)
