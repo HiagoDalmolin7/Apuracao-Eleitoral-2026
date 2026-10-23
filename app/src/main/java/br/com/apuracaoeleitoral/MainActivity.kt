@@ -48,7 +48,13 @@ import java.util.zip.GZIPInputStream
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.view.WindowCompat
-import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -517,6 +523,39 @@ private fun mathematicalVictory(report: TseReport?): MathematicalVictory? {
     return null
 }
 
+// Comemoração presidencial pendente: gravada SOMENTE quando o registro oficial
+// BR satisfaz a regra de irreversibilidade existente acima. Nunca ler projeções
+// manuais, estados individuais ou dados de governador para este alerta.
+private object PresidentialVictoryCelebration {
+    private const val PENDING = "festa_vitoria_presidente_6258_t2_pendente"
+    private const val SHOWN = "festa_vitoria_presidente_6258_t2_vista"
+    private const val LEGACY_ANNOUNCED = "vitoria_matematica_6258_turno_2_anunciada"
+
+    // Este método é chamado no mesmo commit que registra o primeiro anúncio.
+    fun storePending(editor: SharedPreferences.Editor, prefs: SharedPreferences, winner: Int) {
+        if (winner in listOf(22, 13) && prefs.getInt(SHOWN, 0) != winner) {
+            editor.putInt(PENDING, winner)
+        }
+    }
+
+    fun candidateOnNextOpen(prefs: SharedPreferences): Int? {
+        val json = prefs.getString("tse_json_BR", null) ?: return null
+        val official = parseTseReport(json, "BR") ?: return null
+        val winner = mathematicalVictory(official)?.candidateNumber ?: return null
+        if (winner !in listOf(22, 13) || prefs.getInt(SHOWN, 0) == winner) return null
+        // Também reconhece anúncios já salvos por versões anteriores do app.
+        val pending = prefs.getInt(PENDING, 0)
+        val announced = prefs.getInt(LEGACY_ANNOUNCED, 0)
+        return winner.takeIf { it == pending || it == announced }
+    }
+
+    fun markSeen(prefs: SharedPreferences, number: Int) {
+        if (number !in listOf(22, 13)) return
+        // Persistir antes de fechar: reabrir o aplicativo não repetirá a festa.
+        prefs.edit().putInt(SHOWN, number).remove(PENDING).commit()
+    }
+}
+
 // Alertas independentes da urna e dos easter eggs. A confirmação é persistida
 // por eleição/turno para não tocar novamente quando reiniciar o aplicativo.
 private object PresidentialVictoryAudio {
@@ -539,8 +578,11 @@ private object PresidentialVictoryAudio {
                 current.candidate13 < previous.candidate13)) return false
         synchronized(lock) {
             if (prefs.contains(ANNOUNCED)) return false
-            // commit síncrono evita repetições por duas consultas concorrentes.
-            if (!prefs.edit().putInt(ANNOUNCED, winner.candidateNumber).commit()) return false
+            // Persistir o som e a festa no MESMO commit, evitando corrida
+            // entre o serviço em segundo plano e a tela aberta.
+            val event = prefs.edit().putInt(ANNOUNCED, winner.candidateNumber)
+            PresidentialVictoryCelebration.storePending(event, prefs, winner.candidateNumber)
+            if (!event.commit()) return false
         }
         if (prefs.getBoolean(PREF_ENABLED, true)) {
             handler.post { play(context.applicationContext, winner.candidateNumber) }
@@ -1266,6 +1308,11 @@ private fun ElectionApp() {
     var selectedUF by remember { mutableStateOf("SC") }
     var tab by remember { mutableIntStateOf(0) }
     var showOptions by remember { mutableStateOf(false) }
+    // Só é consultado na ENTRADA no aplicativo, nunca durante a detecção da vitória.
+    // Assim, se a vitória acontecer com o app aberto, a festa aguarda a próxima abertura.
+    var celebrationWinner by remember { mutableStateOf<Int?>(null) }
+    // A prévia é independente dos resultados e NUNCA altera o registro de festa vista.
+    var celebrationPreview by remember { mutableStateOf<Int?>(null) }
     // Tema salvo no aparelho, com a opção no menu de três pontos.
     var darkMode by remember { mutableStateOf(prefs.getBoolean("tema_escuro_2026", false)) }
     val palette = if (darkMode) DarkPalette else LightPalette
@@ -1282,39 +1329,54 @@ private fun ElectionApp() {
     val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val topChromeHeight = statusInset + 64.dp
     val bottomChromeHeight = navInset + 84.dp
-    val scrollDistancePx = with(density) { 104.dp.toPx() }
-    var chromeVisible by remember { mutableFloatStateOf(1f) }
-    val chromeNestedScroll = remember(scrollDistancePx, showOptions) {
+    // O destino da navegação é sempre 0 ou 1: nunca manter a pílula pela metade.
+    // A animação é independente da corrotina do fling (que o Android pode cancelar).
+    var chromeTargetVisible by remember { mutableStateOf(true) }
+    val chromeVisible by animateFloatAsState(
+        targetValue = if (chromeTargetVisible) 1f else 0f,
+        animationSpec = tween(durationMillis = 155, easing = FastOutSlowInEasing),
+        label = "Mostrar ou ocultar barras da navegação"
+    )
+    val chromeNestedScroll = remember(showOptions) {
         object : NestedScrollConnection {
+            private fun setFromVerticalMovement(dy: Float) {
+                if (!showOptions && kotlin.math.abs(dy) > 0.5f) {
+                    // Subir o conteúdo: recolher totalmente. Descer: mostrar totalmente.
+                    chromeTargetVisible = dy > 0f
+                }
+            }
+
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                // Detecta gestos curtos e rápidos antes de o conteúdo consumi-los.
+                if (source == NestedScrollSource.UserInput) setFromVerticalMovement(available.y)
+                // Nunca bloquear o gesto: o conteúdo continua rolando normalmente.
+                return Offset.Zero
+            }
+
             override fun onPostScroll(
                 consumed: Offset,
                 available: Offset,
                 source: NestedScrollSource
             ): Offset {
-                // Ao chegar ao início da página, o gesto para baixo também devolve as barras.
-                val gestureY = if (consumed.y != 0f) consumed.y else available.y.coerceAtLeast(0f)
-                if (!showOptions && source == NestedScrollSource.UserInput && abs(gestureY) > 0.5f) {
-                    chromeVisible = (chromeVisible + gestureY / scrollDistancePx).coerceIn(0f, 1f)
+                if (source == NestedScrollSource.UserInput) {
+                    // Garante que a barra reapareça mesmo no topo/fim da lista.
+                    setFromVerticalMovement(if (consumed.y != 0f) consumed.y else available.y)
                 }
                 return Offset.Zero
             }
 
-            // Ao soltar o dedo, completa a transição com uma animação curta.
-            // Durante o gesto, a posição continua vinculada diretamente à rolagem.
-            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
-                if (!showOptions && chromeVisible > 0.01f && chromeVisible < 0.99f) {
-                    val destination = if (chromeVisible >= 0.52f) 1f else 0f
-                    animate(
-                        initialValue = chromeVisible,
-                        targetValue = destination,
-                        animationSpec = tween(durationMillis = 170)
-                    ) { value, _ -> chromeVisible = value }
-                }
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                // A velocidade final define o destino imediatamente, sem depender
+                // de quantos pixels o gesto consumiu nem de um limite de 52%.
+                // Não sobrescrever a direção no onPostFling: uma segunda rolagem
+                // pode começar enquanto o fling antigo ainda está terminando.
+                setFromVerticalMovement(available.y)
                 return Velocity.Zero
             }
+
         }
     }
-    LaunchedEffect(tab, electionMode) { chromeVisible = 1f }
+    LaunchedEffect(tab, electionMode) { chromeTargetVisible = true }
     // O blur segue a posição real da folha modal, inclusive quando arrastada para fechar.
     // Efeito vidro nativo: o conteúdo por trás da pílula vira fonte de blur.
     val dockHazeState = rememberHazeState()
@@ -1414,8 +1476,23 @@ private fun ElectionApp() {
             notificationError = true
         }
     }
+    fun showPendingCelebrationOnEntry() {
+        if (celebrationWinner == null) {
+            celebrationWinner = PresidentialVictoryCelebration.candidateOnNextOpen(prefs)
+        }
+    }
+    // Em uma abertura normal ON_START pode ocorrer antes de o Compose se inscrever.
+    // Esta checagem inicial cobre esse caso, sem reagir ao polling em tempo real.
+    LaunchedEffect(Unit) {
+        if (activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            showPendingCelebrationOnEntry()
+        }
+    }
     DisposableEffect(activity) {
         val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) {
+                showPendingCelebrationOnEntry()
+            }
             if (event == Lifecycle.Event.ON_RESUME) {
                 notificationOn = prefs.getBoolean("notificacao_projecao_ativa", false)
                 // O serviço pode ter atualizado o cache enquanto o app estava em segundo plano.
@@ -1727,6 +1804,15 @@ private fun ElectionApp() {
                 onPreviewVictorySound = { candidate ->
                     PresidentialVictoryAudio.preview(context, candidate)
                 },
+                onPreviewCelebration = { candidate ->
+                    sheetScope.launch {
+                        if (optionsSheetState.isVisible) optionsSheetState.hide()
+                        showOptions = false
+                        sheetExpandedToTop = false
+                        sheetGesturePx = 0f
+                        celebrationPreview = candidate
+                    }
+                },
                 notificationError = notificationError,
                 status = if (electionMode == "governador") {
                     when {
@@ -1991,8 +2077,9 @@ private fun ElectionApp() {
             }
             } // AnimatedContent
             } // Conteúdo com fade nas bordas
-            // Dock flutuante sobre o conteúdo, não retângulo de ponta a ponta.
-            // Continua retraindo junto ao gesto de rolagem da versão anterior.
+            // Quando chromeVisible chega a 0, a altura externa fica 0dp.
+            // A pílula inteira (inclusive sombra/blur) sai da área visível; sem meia barra.
+            // O destino do gesto é definido mesmo durante flings muito rápidos.
             Box(
                 Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                     .height(bottomChromeHeight * chromeVisible).clipToBounds()
@@ -2009,10 +2096,10 @@ private fun ElectionApp() {
                         selected = tab,
                         onTabSelected = { next ->
                             if (tab != next) tab = next
-                            chromeVisible = 1f
+                            chromeTargetVisible = true
                         },
                         onSettings = {
-                            chromeVisible = 1f
+                            chromeTargetVisible = true
                             showOptions = true
                         },
                         modifier = Modifier.align(Alignment.BottomCenter)
@@ -2024,6 +2111,22 @@ private fun ElectionApp() {
             }
             } // Área de conteúdo e dock
 
+        }
+        val celebrationToDisplay = celebrationWinner ?: celebrationPreview
+        celebrationToDisplay?.let { winner ->
+            val previewMode = celebrationWinner == null
+            PresidentialVictoryCelebrationDialog(
+                candidateNumber = winner,
+                preview = previewMode,
+                onContinue = {
+                    if (previewMode) {
+                        celebrationPreview = null
+                    } else {
+                        PresidentialVictoryCelebration.markSeen(prefs, winner)
+                        celebrationWinner = null
+                    }
+                }
+            )
         }
         // Scrim próprio: o padrão do ModalBottomSheet escurecia instantaneamente
         // quando o diálogo desaparecia. A camada segue a mesma animação do blur.
@@ -2038,6 +2141,153 @@ private fun ElectionApp() {
     }
 }
 
+
+// Festa visual renderizada pelo Compose: nenhum GIF ou arquivo adicional.
+// Os fogos e confetes param automaticamente ao fechar o Dialog.
+@Composable
+private fun PresidentialVictoryFireworks(accent: Color, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "Fogos de vitória")
+    val progress by transition.animateFloat(
+        initialValue = 0f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(animation = tween(3400, easing = LinearEasing)),
+        label = "Ciclo de fogos e confetes"
+    )
+    val shades = remember(accent) {
+        listOf(accent, Color(0xFFFFD56C), Color(0xFFFFF4C4), Color.White)
+    }
+    Canvas(modifier) {
+        // Confetes: trajetória determinística para evitar alocações aleatórias por frame.
+        val dotRadius = 2.4.dp.toPx()
+        for (i in 0 until 58) {
+            val t = (progress + i * 0.119f) % 1f
+            val baseX = ((i * 37 + 21) % 101) / 100f
+            val sway = kotlin.math.sin((progress * 6.283185f + i * 0.7f).toDouble()).toFloat()
+            val x = (baseX * size.width + sway * 13.dp.toPx()).coerceIn(0f, size.width)
+            val y = (t * size.height).coerceIn(0f, size.height)
+            drawCircle(
+                color = shades[i % shades.size],
+                radius = dotRadius * if (i % 3 == 0) 1.3f else 0.85f,
+                center = Offset(x, y), alpha = 0.15f + 0.6f * (1f - t)
+            )
+        }
+        // Cinco explosões de fogos ao redor, sem cobrir o texto central.
+        for (burst in 0 until 5) {
+            val age = (progress * 1.55f + burst * 0.25f) % 1f
+            val center = Offset(
+                size.width * (0.14f + (burst % 3) * 0.35f),
+                size.height * (0.12f + (burst % 2) * 0.18f)
+            )
+            val span = 8.dp.toPx() + age * 43.dp.toPx()
+            val alpha = (1f - age).coerceIn(0f, 1f) * 0.7f
+            for (ray in 0 until 11) {
+                val angle = (ray * (2.0 * Math.PI / 11.0) + burst * 0.38)
+                val dx = kotlin.math.cos(angle).toFloat()
+                val dy = kotlin.math.sin(angle).toFloat()
+                drawLine(
+                    color = shades[(burst + ray) % shades.size],
+                    start = Offset(center.x + dx * span * 0.68f, center.y + dy * span * 0.68f),
+                    end = Offset(center.x + dx * span, center.y + dy * span),
+                    strokeWidth = 2.dp.toPx(), alpha = alpha,
+                    cap = StrokeCap.Round
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PresidentialVictoryCelebrationDialog(
+    candidateNumber: Int,
+    preview: Boolean,
+    onContinue: () -> Unit
+) {
+    val name = if (candidateNumber == 22) "Flávio Bolsonaro" else "Lula"
+    val accent = if (candidateNumber == 22) Verde else Vermelho
+    val portrait = if (candidateNumber == 22) R.drawable.candidato_flavio
+        else R.drawable.candidato_lula
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val darkStart = if (candidateNumber == 22) Color(0xFF082D27) else Color(0xFF3B1320)
+    val darkEnd = Color(0xFF10182C)
+    val gold = Color(0xFFFFD56C)
+    val panel = RoundedCornerShape(28.dp)
+
+    Dialog(
+        onDismissRequest = onContinue,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 20.dp)
+                .clip(panel)
+                .background(Brush.verticalGradient(listOf(darkStart, darkEnd)))
+                .border(1.dp, gold.copy(alpha = 0.65f), panel)
+        ) {
+            PresidentialVictoryFireworks(accent, Modifier.matchParentSize())
+            Column(
+                Modifier.fillMaxWidth().heightIn(max = 640.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp, vertical = 28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (preview) {
+                    Text("SIMULAÇÃO • SEM RESULTADOS REAIS", fontSize = 11.sp,
+                        color = Color(0xFFFFE6AA), textAlign = TextAlign.Center,
+                        fontWeight = FontWeight.Bold)
+                }
+                Text("🏆", fontSize = 42.sp)
+                Text(
+                    "MATEMATICAMENTE ELEITO",
+                    color = gold, fontWeight = FontWeight.Bold, fontSize = 16.sp,
+                    textAlign = TextAlign.Center, letterSpacing = 1.sp
+                )
+                Spacer(Modifier.height(6.dp))
+                Box(contentAlignment = Alignment.Center) {
+                    Box(
+                        Modifier.size(202.dp).clip(RoundedCornerShape(32.dp))
+                            .background(accent.copy(alpha = 0.3f))
+                    )
+                    Image(
+                        painter = painterResource(id = portrait),
+                        contentDescription = "Retrato ilustrado de $name",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.size(184.dp).clip(RoundedCornerShape(26.dp))
+                            .border(3.dp, gold, RoundedCornerShape(26.dp))
+                    )
+                }
+                Text(
+                    name, color = Color.White, fontWeight = FontWeight.ExtraBold,
+                    fontSize = 29.sp, textAlign = TextAlign.Center, lineHeight = 34.sp
+                )
+                Text(
+                    if (preview) "Veja como será a comemoração quando houver vitória matemática."
+                    else "A vantagem nos votos oficiais se tornou matematicamente irreversível.",
+                    color = Color(0xFFDFE8F4), fontSize = 14.sp,
+                    textAlign = TextAlign.Center, lineHeight = 20.sp
+                )
+                Text(
+                    "Conclusão calculada pelo aplicativo, não uma declaração oficial do TSE.",
+                    color = Color(0xFFACBED2), fontSize = 11.sp,
+                    textAlign = TextAlign.Center, lineHeight = 16.sp
+                )
+                Spacer(Modifier.height(4.dp))
+                Button(
+                    onClick = onContinue,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = gold),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text("Continuar", color = Color(0xFF152132),
+                        fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+                TextButton(onClick = {
+                    PresidentialVictoryAudio.preview(context, candidateNumber)
+                }) {
+                    Text("♫  Ouvir som da vitória", color = Color.White, fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
 
 // Estrutura compartilhada dos menus: a altura EXTERNA permanece fixa.
 // O fundo do painel alcança o rodapé edge-to-edge; os controles internos usam
@@ -2095,6 +2345,7 @@ private fun ElectionOptionsSheet(
     victorySoundEnabled: Boolean,
     onVictorySoundEnabledChange: (Boolean) -> Unit,
     onPreviewVictorySound: (Int) -> String,
+    onPreviewCelebration: (Int) -> Unit,
     notificationError: Boolean,
     status: String,
     onDismiss: () -> Unit,
@@ -2329,6 +2580,19 @@ private fun ElectionOptionsSheet(
                             soundTestMessage = onPreviewVictorySound(13)
                         }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
                             Text("▶ Testar Lula", fontSize = 11.sp)
+                        }
+                    }
+                    HorizontalDivider(color = Borda)
+                    Text("Prévia da comemoração (simulação)",
+                        fontSize = 12.sp, color = Secundario)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { onPreviewCelebration(22) },
+                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
+                            Text("🎆 Flávio", fontSize = 11.sp)
+                        }
+                        OutlinedButton(onClick = { onPreviewCelebration(13) },
+                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
+                            Text("🎆 Lula", fontSize = 11.sp)
                         }
                     }
                     if (notificationError) {
