@@ -1308,6 +1308,26 @@ private fun ElectionApp() {
     var selectedUF by remember { mutableStateOf("SC") }
     var tab by remember { mutableIntStateOf(0) }
     var showOptions by remember { mutableStateOf(false) }
+    // Easter egg somente após TRÊS toques consecutivos na foto do mesmo candidato.
+    // O relógio monotônico evita problemas se a hora do celular mudar.
+    var portraitTapCandidate by remember { mutableIntStateOf(0) }
+    var portraitTapCount by remember { mutableIntStateOf(0) }
+    var portraitLastTapMs by remember { mutableLongStateOf(0L) }
+    fun handleCandidatePortraitTap(number: Int) {
+        if (number !in listOf(22, 13)) return
+        val now = SystemClock.uptimeMillis()
+        if (portraitTapCandidate != number || now - portraitLastTapMs > 1250L) {
+            portraitTapCandidate = number
+            portraitTapCount = 0
+        }
+        portraitLastTapMs = now
+        portraitTapCount++
+        if (portraitTapCount >= 3) {
+            portraitTapCount = 0
+            portraitTapCandidate = 0
+            CandidateEasterEggAudio.play(context, number)
+        }
+    }
     // Só é consultado na ENTRADA no aplicativo, nunca durante a detecção da vitória.
     // Assim, se a vitória acontecer com o app aberto, a festa aguarda a próxima abertura.
     var celebrationWinner by remember { mutableStateOf<Int?>(null) }
@@ -1329,51 +1349,42 @@ private fun ElectionApp() {
     val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val topChromeHeight = statusInset + 64.dp
     val bottomChromeHeight = navInset + 84.dp
-    // O destino da navegação é sempre 0 ou 1: nunca manter a pílula pela metade.
-    // A animação é independente da corrotina do fling (que o Android pode cancelar).
+    // A pílula tem destinos fixos (totalmente visível ou oculta), mas percorre
+    // a transição com suavidade. Não anima dentro da corrotina de fling cancelável.
     var chromeTargetVisible by remember { mutableStateOf(true) }
     val chromeVisible by animateFloatAsState(
         targetValue = if (chromeTargetVisible) 1f else 0f,
-        animationSpec = tween(durationMillis = 155, easing = FastOutSlowInEasing),
-        label = "Mostrar ou ocultar barras da navegação"
+        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
+        label = "Recolher barra flutuante suavemente"
     )
-    val chromeNestedScroll = remember(showOptions) {
+    val gestureThresholdPx = with(density) { 12.dp.toPx() }
+    val chromeNestedScroll = remember(showOptions, gestureThresholdPx) {
         object : NestedScrollConnection {
-            private fun setFromVerticalMovement(dy: Float) {
-                if (!showOptions && kotlin.math.abs(dy) > 0.5f) {
-                    // Subir o conteúdo: recolher totalmente. Descer: mostrar totalmente.
-                    chromeTargetVisible = dy > 0f
+            private var accumulatedY = 0f
+
+            private fun onMovement(dy: Float, force: Boolean = false) {
+                if (showOptions || kotlin.math.abs(dy) < 0.5f) return
+                // Ignorar os pequenos rebotes que acontecem durante um fling.
+                if (accumulatedY * dy < 0f) accumulatedY = 0f
+                accumulatedY = (accumulatedY + dy)
+                    .coerceIn(-gestureThresholdPx * 2f, gestureThresholdPx * 2f)
+                if (force || kotlin.math.abs(accumulatedY) >= gestureThresholdPx) {
+                    chromeTargetVisible = accumulatedY > 0f
+                    accumulatedY = 0f
                 }
             }
 
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                // Detecta gestos curtos e rápidos antes de o conteúdo consumi-los.
-                if (source == NestedScrollSource.UserInput) setFromVerticalMovement(available.y)
-                // Nunca bloquear o gesto: o conteúdo continua rolando normalmente.
-                return Offset.Zero
-            }
-
-            override fun onPostScroll(
-                consumed: Offset,
-                available: Offset,
-                source: NestedScrollSource
-            ): Offset {
-                if (source == NestedScrollSource.UserInput) {
-                    // Garante que a barra reapareça mesmo no topo/fim da lista.
-                    setFromVerticalMovement(if (consumed.y != 0f) consumed.y else available.y)
-                }
-                return Offset.Zero
+                if (source == NestedScrollSource.UserInput) onMovement(available.y)
+                return Offset.Zero // A rolagem continua livre para a página.
             }
 
             override suspend fun onPreFling(available: Velocity): Velocity {
-                // A velocidade final define o destino imediatamente, sem depender
-                // de quantos pixels o gesto consumiu nem de um limite de 52%.
-                // Não sobrescrever a direção no onPostFling: uma segunda rolagem
-                // pode começar enquanto o fling antigo ainda está terminando.
-                setFromVerticalMovement(available.y)
+                // Finalizar o gesto rápido no destino completo, independente
+                // da distância percorrida ou do encerramento da animação de fling.
+                if (kotlin.math.abs(available.y) > 60f) onMovement(available.y, force = true)
                 return Velocity.Zero
             }
-
         }
     }
     LaunchedEffect(tab, electionMode) { chromeTargetVisible = true }
@@ -1996,7 +2007,7 @@ private fun ElectionApp() {
                         states = manualStates, computed = projections,
                         onChoose = { selectedUF = it; tab = 1 },
                         onStates = { tab = 1 },
-                        onEasterEgg = { number -> CandidateEasterEggAudio.play(context, number) }
+                        onEasterEgg = { number -> handleCandidatePortraitTap(number) }
                     )
                     1 -> ManualRegions(
                         modifier = Modifier.padding(padding),
@@ -2041,7 +2052,7 @@ private fun ElectionApp() {
                         failed = unavailable,
                         onChoose = { selectedUF = it; tab = 1 },
                         onStates = { tab = 1 },
-                        onEasterEgg = { number -> CandidateEasterEggAudio.play(context, number) }
+                        onEasterEgg = { number -> handleCandidatePortraitTap(number) }
                     )
                     1 -> OfficialRegions(
                         modifier = Modifier.padding(padding),
@@ -2206,6 +2217,15 @@ private fun PresidentialVictoryCelebrationDialog(
     val portrait = if (candidateNumber == 22) R.drawable.candidato_flavio
         else R.drawable.candidato_lula
     val context = androidx.compose.ui.platform.LocalContext.current
+    // Começa no primeiro frame em que a comemoração aparece. LaunchedEffect
+    // roda uma vez por apresentação, não em cada recomposição da animação.
+    // Respeita o interruptor "Som de vitória" e o modo silencioso do aparelho.
+    LaunchedEffect(candidateNumber, preview) {
+        val prefs = context.getSharedPreferences("apuracao_v2", Context.MODE_PRIVATE)
+        if (prefs.getBoolean(PresidentialVictoryAudio.PREF_ENABLED, true)) {
+            PresidentialVictoryAudio.preview(context, candidateNumber)
+        }
+    }
     val darkStart = if (candidateNumber == 22) Color(0xFF082D27) else Color(0xFF3B1320)
     val darkEnd = Color(0xFF10182C)
     val gold = Color(0xFFFFD56C)
@@ -2282,7 +2302,7 @@ private fun PresidentialVictoryCelebrationDialog(
                 TextButton(onClick = {
                     PresidentialVictoryAudio.preview(context, candidateNumber)
                 }) {
-                    Text("♫  Ouvir som da vitória", color = Color.White, fontSize = 12.sp)
+                    Text("♫  Reproduzir novamente o som", color = Color.White, fontSize = 12.sp)
                 }
             }
         }
@@ -3247,7 +3267,7 @@ private fun CandidatePortrait(
         val shape = RoundedCornerShape(corner)
         Image(
             painter = painterResource(id = portrait),
-            contentDescription = if (onClick != null) "Ouvir easter egg de $name" else "Retrato ilustrado de $name",
+            contentDescription = if (onClick != null) "Toque três vezes para ouvir o easter egg de $name" else "Retrato ilustrado de $name",
             contentScale = ContentScale.Crop,
             modifier = Modifier.size(size)
                 .clip(shape).then(interaction)
@@ -3292,7 +3312,7 @@ private fun EasterEggPortraits(
     candidateA: String, candidateB: String,
     onEasterEgg: (Int) -> Unit
 ) {
-    Text("Toque na foto de um candidato para ouvir o easter egg.",
+    Text("Toque 3 vezes seguidas na foto para ouvir o easter egg.",
         color = Secundario, fontSize = 12.sp)
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
         Column(horizontalAlignment = Alignment.CenterHorizontally,
