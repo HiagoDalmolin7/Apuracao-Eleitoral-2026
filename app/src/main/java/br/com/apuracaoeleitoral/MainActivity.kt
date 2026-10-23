@@ -458,6 +458,85 @@ private fun fetchGovernor(prefs: SharedPreferences, uf: String): GovernorDownloa
     }
 }
 
+// === Histórico de evolução (gravado localmente; nenhum dado histórico é inventado) ===
+private data class EvolutionPoint(
+    val moment: Long,
+    val observedA: Double,
+    val observedB: Double,
+    val projectedA: Double,
+    val projectedB: Double,
+    val percentage: Double
+)
+
+private fun readEvolution(prefs: SharedPreferences, id: String): List<EvolutionPoint> = runCatching {
+    val data = JSONArray(prefs.getString("evolution_2026_$id", "[]") ?: "[]")
+    (0 until data.length()).mapNotNull { i ->
+        runCatching {
+            val o = data.getJSONObject(i)
+            EvolutionPoint(
+                o.getLong("t"), o.getDouble("oa"), o.getDouble("ob"),
+                o.getDouble("pa"), o.getDouble("pb"), o.optDouble("pct", 0.0)
+            )
+        }.getOrNull()
+    }.filter { it.moment > 0L && it.observedA >= 0 && it.observedB >= 0 }
+}.getOrDefault(emptyList())
+
+private fun addEvolution(
+    prefs: SharedPreferences,
+    id: String,
+    old: List<EvolutionPoint>,
+    point: EvolutionPoint?
+): List<EvolutionPoint> {
+    if (point == null || point.observedA + point.observedB <= 0.0) return old
+    val previous = old.lastOrNull()
+    // O TSE pode devolver o mesmo arquivo em consultas consecutivas. Não criar pontos falsos.
+    if (previous != null && previous.observedA == point.observedA &&
+        previous.observedB == point.observedB && previous.projectedA == point.projectedA &&
+        previous.projectedB == point.projectedB && previous.percentage == point.percentage) return old
+    var all = old + point
+    // Histórico durável e compacto, mantendo os registros antigos em amostragem progressiva.
+    if (all.size > 900) all = listOf(all.first()) + all.drop(1).filterIndexed { index, _ -> index % 2 == 0 }
+    val json = JSONArray()
+    all.forEach { p ->
+        json.put(JSONObject().put("t", p.moment).put("oa", p.observedA)
+            .put("ob", p.observedB).put("pa", p.projectedA)
+            .put("pb", p.projectedB).put("pct", p.percentage))
+    }
+    prefs.edit().putString("evolution_2026_$id", json.toString()).apply()
+    return all
+}
+
+private fun presidentEvolution(
+    official: Map<String, TseReport>,
+    manual: Map<String, StateData>?,
+    moment: Long
+): EvolutionPoint? {
+    val inputs = if (manual != null) manual else
+        (UFS + "ZZ").associateWith { uf -> official[uf]?.let(::stateFromOfficial) ?: StateData(uf) }
+    val regional = inputs.values.map(::estimate).filter { it.valid }
+    val projA = regional.sumOf { it.a }
+    val projB = regional.sumOf { it.b }
+    val countedFromRegionsA = regional.sumOf { it.observedA }
+    val countedFromRegionsB = regional.sumOf { it.observedB }
+    val brazil = if (manual == null) official["BR"] else null
+    val observedA = brazil?.takeIf { it.hasVotes }?.candidate22?.toDouble() ?: countedFromRegionsA
+    val observedB = brazil?.takeIf { it.hasVotes }?.candidate13?.toDouble() ?: countedFromRegionsB
+    val apurado = if (brazil != null && brazil.sectionsTotal > 0L) brazil.sectionsPercent else {
+        // No manual, sem número de seções por UF, não há % nacional ponderado confiável.
+        0.0
+    }
+    if (observedA + observedB <= 0.0) return null
+    return EvolutionPoint(moment, observedA, observedB, projA, projB, apurado)
+}
+
+private fun governorEvolution(report: GovernorReport, moment: Long): EvolutionPoint? {
+    if (!report.hasVotes || report.candidates.size != 2) return null
+    return EvolutionPoint(
+        moment, report.candidates[0].votes.toDouble(), report.candidates[1].votes.toDouble(),
+        report.projected[0], report.projected[1], report.sectionsPercent
+    )
+}
+
 private fun clockTime(whenMs: Long): String = if (whenMs <= 0L) "—"
     else SimpleDateFormat("dd/MM HH:mm:ss", PtBr).format(Date(whenMs))
 
@@ -505,6 +584,12 @@ private fun ElectionApp() {
     var governorLastGood by remember { mutableLongStateOf(prefs.getLong("tse_gov_last_ok", 0L)) }
     var governorFailed by remember { mutableStateOf(emptySet<String>()) }
     var governorRetry by remember { mutableIntStateOf(0) }
+    // Histórico separado por eleição, modo manual e cada unidade federativa.
+    var autoEvolution by remember { mutableStateOf(readEvolution(prefs, "presidente_tse")) }
+    var manualEvolution by remember { mutableStateOf(readEvolution(prefs, "presidente_manual")) }
+    var governorEvolutionHistory by remember {
+        mutableStateOf(GOVERNOR_UFS.associateWith { readEvolution(prefs, "gov_$it") })
+    }
     var selectedUF by remember { mutableStateOf("SC") }
     var tab by remember { mutableIntStateOf(0) }
     // O modo manual utiliza as mesmas chaves da versão original (uf_SC, uf_GO...).
@@ -655,6 +740,33 @@ private fun ElectionApp() {
         }
     }
 
+    // Registrar somente observações efetivamente recebidas. Após fechar e reabrir,
+    // o cache existente vira a primeira observação se o histórico ainda estiver vazio.
+    LaunchedEffect(reports) {
+        autoEvolution = addEvolution(
+            prefs, "presidente_tse", autoEvolution,
+            presidentEvolution(reports, null, System.currentTimeMillis())
+        )
+    }
+    LaunchedEffect(governorReports) {
+        var changed = governorEvolutionHistory
+        governorReports.forEach { (uf, report) ->
+            val before = changed[uf].orEmpty()
+            val after = addEvolution(prefs, "gov_$uf", before,
+                governorEvolution(report, System.currentTimeMillis()))
+            if (after !== before) changed = changed + (uf to after)
+        }
+        governorEvolutionHistory = changed
+    }
+    LaunchedEffect(manualStates) {
+        // Esperar o usuário terminar de digitar, sem gravar cada tecla como uma nova atualização.
+        delay(1_200L)
+        manualEvolution = addEvolution(
+            prefs, "presidente_manual", manualEvolution,
+            presidentEvolution(emptyMap(), manualStates, System.currentTimeMillis())
+        )
+    }
+
     val officialStates = remember(reports) {
         (UFS + "ZZ").associateWith { region ->
             stateFromOfficial(reports[region]).let { if (it.uf.isBlank()) it.copy(uf = region) else it }
@@ -752,7 +864,7 @@ private fun ElectionApp() {
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        listOf("Painel", "Estados", "Mapa", "Estatísticas").forEachIndexed { index, label ->
+                        listOf("Painel", "Estados", "Mapa", "Gráfico", "Estat.").forEachIndexed { index, label ->
                             BottomTab(label, index, tab == index, { tab = index }, Modifier.weight(1f))
                         }
                     }
@@ -784,6 +896,15 @@ private fun ElectionApp() {
                         onSelect = { uf -> selectedGovernorUF = uf; prefs.edit().putString("governador_uf_2026", uf).apply() },
                         onDetails = { tab = 1 }
                     )
+                    3 -> EvolutionPage(
+                        modifier = Modifier.padding(padding),
+                        title = "Governador • $selectedGovernorUF",
+                        points = governorEvolutionHistory[selectedGovernorUF].orEmpty(),
+                        nameA = stateReport?.candidates?.getOrNull(0)?.name ?: "Candidato 1",
+                        nameB = stateReport?.candidates?.getOrNull(1)?.name ?: "Candidato 2",
+                        colorA = GOVERNOR_BLUE, colorB = GOVERNOR_PURPLE,
+                        description = "Dados oficiais do TSE. As projeções usam o percentual de seções apuradas."
+                    )
                     else -> GovernorStatistics(Modifier.padding(padding), selectedGovernorUF, stateReport, govStatus)
                 }
             } else if (manualMode) {
@@ -809,6 +930,18 @@ private fun ElectionApp() {
                         candidateA = labelsA, candidateB = labelsB,
                         computed = projections.filterKeys { it in UFS },
                         editState = { selectedUF = it; tab = 1 }, manualMode = true
+                    )
+                    3 -> EvolutionPage(
+                        modifier = Modifier.padding(padding),
+                        title = "Presidente • modo manual",
+                        points = manualEvolution,
+                        nameA = labelsA, nameB = labelsB,
+                        colorA = Verde, colorB = Vermelho,
+                        description = "Histórico dos valores digitados no aparelho. Não são dados oficiais do TSE.",
+                        onClear = {
+                            prefs.edit().remove("evolution_2026_presidente_manual").apply()
+                            manualEvolution = emptyList()
+                        }
                     )
                     else -> ManualStatistics(
                         modifier = Modifier.padding(padding),
@@ -839,6 +972,14 @@ private fun ElectionApp() {
                         candidateA = labelsA, candidateB = labelsB,
                         computed = projections.filterKeys { it in UFS },
                         editState = { selectedUF = it; tab = 1 }, manualMode = false
+                    )
+                    3 -> EvolutionPage(
+                        modifier = Modifier.padding(padding),
+                        title = "Presidente • TSE",
+                        points = autoEvolution,
+                        nameA = labelsA, nameB = labelsB,
+                        colorA = Verde, colorB = Vermelho,
+                        description = "Votos apurados oficialmente e projeção por UF, incluindo exterior quando disponível. Projeção não oficial."
                     )
                     else -> OfficialStatistics(
                         modifier = Modifier.padding(padding),
@@ -1075,7 +1216,7 @@ private fun BottomTab(
         }
         Text(
             text = name,
-            fontSize = if (name == "Estatísticas") 10.sp else 11.sp,
+            fontSize = 10.sp,
             lineHeight = 13.sp,
             fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
             color = tint,
@@ -1126,6 +1267,19 @@ private fun BottomTabSymbol(index: Int, tint: Color) {
                 drawPath(folds, tint, style = Stroke(width = stroke))
                 drawLine(tint, Offset(9f * u, 2f * u), Offset(8f * u, 19f * u), strokeWidth = stroke)
                 drawLine(tint, Offset(16f * u, 5f * u), Offset(15f * u, 22f * u), strokeWidth = stroke)
+            }
+            3 -> {
+                // Gráfico: linha de evolução temporal.
+                val line = Path().apply {
+                    moveTo(2f * u, 20f * u)
+                    lineTo(7f * u, 13f * u)
+                    lineTo(12f * u, 16f * u)
+                    lineTo(17f * u, 6f * u)
+                    lineTo(22f * u, 9f * u)
+                }
+                drawPath(line, tint, style = Stroke(width = stroke, cap = StrokeCap.Round))
+                drawLine(tint, Offset(2f * u, 3f * u), Offset(2f * u, 22f * u), strokeWidth = stroke)
+                drawLine(tint, Offset(2f * u, 22f * u), Offset(22f * u, 22f * u), strokeWidth = stroke)
             }
             else -> {
                 // Estatísticas: barras de alturas diferentes.
@@ -1821,6 +1975,189 @@ private fun SummaryLine(label: String, value: String) {
 // licença MIT: https://gist.github.com/ppKrauss/0c33364240e841fa23e78b21005f792c
 // Os polígonos são embarcados no app (não há necessidade de internet ou API).
 private const val BR_MAP_GZIP_BASE64 = "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"
+
+// === Aba Gráfico: somente a evolução da porcentagem FINAL projetada ===
+// O histórico existente é preservado: as porcentagens são calculadas a partir
+// dos votos finais projetados em cada atualização (e NÃO dos votos já apurados).
+private data class ProjectionPercentPoint(
+    val moment: Long,
+    val a: Double,
+    val b: Double
+)
+
+private fun projectionPercentHistory(points: List<EvolutionPoint>): List<ProjectionPercentPoint> =
+    points.mapNotNull { p ->
+        val total = p.projectedA + p.projectedB
+        if (!total.isFinite() || total <= 0.0 ||
+            !p.projectedA.isFinite() || !p.projectedB.isFinite() ||
+            p.projectedA < 0.0 || p.projectedB < 0.0) null
+        else {
+            val a = (p.projectedA / total * 100.0).coerceIn(0.0, 100.0)
+            ProjectionPercentPoint(p.moment, a, 100.0 - a)
+        }
+    }
+
+@Composable
+private fun EvolutionPage(
+    modifier: Modifier,
+    title: String,
+    points: List<EvolutionPoint>,
+    nameA: String,
+    nameB: String,
+    colorA: Color,
+    colorB: Color,
+    description: String,
+    onClear: (() -> Unit)? = null
+) {
+    val percentHistory = remember(points) { projectionPercentHistory(points) }
+    ContentColumn(modifier) {
+        Text("Evolução da projeção", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Tinta)
+        Text(title, fontSize = 14.sp, color = Secundario)
+        Note(description + " O gráfico mostra a porcentagem final estimada de cada candidato, " +
+            "não a porcentagem dos votos já apurados.")
+        if (percentHistory.isEmpty()) {
+            SurfaceCard {
+                Text("Aguardando dados de projeção", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    "O gráfico aparecerá quando houver votos suficientes para calcular uma projeção. " +
+                        "Não são criados pontos retroativos ou fictícios.",
+                    color = Secundario
+                )
+            }
+        } else {
+            val latest = percentHistory.last()
+            SurfaceCard {
+                Text("Projeção mais recente", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text(clockTime(latest.moment), fontSize = 12.sp, color = Secundario)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ProjectionPercentNumber(nameA, latest.a, colorA, Modifier.weight(1f))
+                    ProjectionPercentNumber(nameB, latest.b, colorB, Modifier.weight(1f))
+                }
+                Text("${percentHistory.size} atualização(ões) no histórico", fontSize = 12.sp, color = Secundario)
+            }
+            ProjectionPercentChart(percentHistory, nameA, nameB, colorA, colorB)
+            if (percentHistory.size == 1) {
+                Note("O primeiro registro já está no gráfico. A linha aparecerá depois que houver " +
+                    "uma nova atualização dos resultados.")
+            }
+            if (onClear != null) {
+                var confirming by remember { mutableStateOf(false) }
+                OutlinedButton(onClick = { confirming = true }) { Text("Limpar histórico manual") }
+                if (confirming) AlertDialog(
+                    onDismissRequest = { confirming = false },
+                    title = { Text("Apagar histórico do gráfico?") },
+                    text = { Text("Os dados preenchidos serão preservados. " +
+                        "Somente os registros de evolução do modo manual serão apagados.") },
+                    confirmButton = { TextButton(onClick = { onClear(); confirming = false }) { Text("Apagar") } },
+                    dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancelar") } }
+                )
+            }
+        }
+        Text(
+            "Cada ponto representa uma projeção calculada a partir dos dados registrados naquele momento. " +
+                "Consultas sem alterações não acrescentam pontos. Histórico salvo no próprio aparelho.",
+            fontSize = 12.sp, color = Secundario
+        )
+    }
+}
+
+@Composable
+private fun ProjectionPercentNumber(name: String, value: Double, tint: Color, modifier: Modifier = Modifier) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Box(Modifier.size(9.dp).clip(CircleShape).background(tint))
+            Text(name, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                maxLines = 2, color = Tinta, overflow = TextOverflow.Ellipsis)
+        }
+        // Percentuais sempre pretos; verde/vermelho identificam as séries.
+        Text(percentage(value), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+    }
+}
+
+@Composable
+private fun ProjectionPercentChart(
+    points: List<ProjectionPercentPoint>,
+    nameA: String,
+    nameB: String,
+    colorA: Color,
+    colorB: Color
+) {
+    SurfaceCard {
+        Text("Porcentagem projetada ao longo do tempo", fontSize = 17.sp,
+            fontWeight = FontWeight.Bold, color = Tinta)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            ProjectionLegend(nameA, colorA, Modifier.weight(1f))
+            ProjectionLegend(nameB, colorB, Modifier.weight(1f))
+        }
+        Row(Modifier.fillMaxWidth().height(240.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            Column(
+                modifier = Modifier.width(39.dp).fillMaxHeight(),
+                verticalArrangement = Arrangement.SpaceBetween,
+                horizontalAlignment = Alignment.End
+            ) {
+                listOf("100%", "75%", "50%", "25%", "0%").forEach { label ->
+                    Text(label, fontSize = 10.sp, color = Secundario)
+                }
+            }
+            Canvas(Modifier.weight(1f).fillMaxHeight()) {
+                val insetTop = 7.dp.toPx()
+                val insetBottom = 7.dp.toPx()
+                val graphHeight = (size.height - insetTop - insetBottom).coerceAtLeast(1f)
+                val graphWidth = size.width.coerceAtLeast(1f)
+                val startTime = points.first().moment
+                val elapsed = (points.last().moment - startTime).coerceAtLeast(1L)
+                fun x(index: Int): Float = if (points.size == 1) graphWidth / 2f else
+                    ((points[index].moment - startTime).toFloat() / elapsed)
+                        .coerceIn(0f, 1f) * graphWidth
+                fun y(percent: Double): Float = insetTop + graphHeight *
+                    (1.0 - percent.coerceIn(0.0, 100.0) / 100.0).toFloat()
+
+                // Eixo fixo 0–100%: não exagera visualmente variações pequenas.
+                listOf(0.0, 25.0, 50.0, 75.0, 100.0).forEach { tick ->
+                    val py = y(tick)
+                    drawLine(Borda, Offset(0f, py), Offset(graphWidth, py),
+                        strokeWidth = 1.dp.toPx())
+                }
+                fun plot(tint: Color, getValue: (ProjectionPercentPoint) -> Double) {
+                    val path = Path()
+                    points.forEachIndexed { index, point ->
+                        val px = x(index)
+                        val py = y(getValue(point))
+                        if (index == 0) path.moveTo(px, py) else path.lineTo(px, py)
+                    }
+                    if (points.size > 1) {
+                        drawPath(path, tint, style = Stroke(
+                            width = 2.8.dp.toPx(), cap = StrokeCap.Round))
+                    }
+                    val lastIndex = points.lastIndex
+                    val marker = Offset(x(lastIndex), y(getValue(points[lastIndex])))
+                    drawCircle(Color.White, radius = 5.4.dp.toPx(), center = marker)
+                    drawCircle(tint, radius = 3.4.dp.toPx(), center = marker)
+                }
+                plot(colorA) { it.a }
+                plot(colorB) { it.b }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("Início: ${smallTime(points.first().moment)}", fontSize = 11.sp, color = Secundario)
+            Text("Última: ${smallTime(points.last().moment)}", fontSize = 11.sp, color = Secundario)
+        }
+        Text("A escala vai de 0% a 100%. As duas linhas somam 100% dos votos válidos projetados.",
+            fontSize = 11.sp, color = Secundario)
+    }
+}
+
+@Composable
+private fun ProjectionLegend(name: String, tint: Color, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        Box(Modifier.width(14.dp).height(3.dp).clip(RoundedCornerShape(5.dp)).background(tint))
+        Text(name, color = Tinta, fontSize = 11.sp, maxLines = 1,
+            overflow = TextOverflow.Ellipsis)
+    }
+}
+
+private fun smallTime(epoch: Long): String = SimpleDateFormat("HH:mm", PtBr).format(Date(epoch))
 
 private data class UfOutline(val uf: String, val points: List<Offset>)
 
