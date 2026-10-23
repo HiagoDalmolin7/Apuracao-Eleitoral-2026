@@ -50,6 +50,7 @@ import java.util.zip.GZIPInputStream
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.view.WindowCompat
+import androidx.core.content.edit
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.infiniteRepeatable
@@ -124,6 +125,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.sp
 import org.json.JSONObject
 import org.json.JSONArray
@@ -348,9 +351,10 @@ private object OfficialUpdateSound {
     private val lock = Any()
     private var activePlayer: MediaPlayer? = null
 
-    fun hasFile(context: Context): Boolean = context.resources.getIdentifier(
-        "som_urna", "raw", context.packageName
-    ) != 0
+    // Recurso obrigatório e verificado por ID compilado: sem reflexão em runtime.
+    fun hasFile(context: Context): Boolean = runCatching {
+        context.resources.openRawResource(R.raw.som_urna).use { it.read() >= 0 }
+    }.getOrDefault(false)
 
     private fun mayPlay(context: Context): Boolean {
         val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -367,7 +371,7 @@ private object OfficialUpdateSound {
         synchronized(lock) {
             val last = prefs.getLong(LAST_PLAYED, -1L)
             if (last >= 0L && now >= last && now - last < MIN_INTERVAL_MS) return
-            prefs.edit().putLong(LAST_PLAYED, now).apply()
+            prefs.edit { putLong(LAST_PLAYED, now) }
         }
         handler.post { play(context.applicationContext) }
     }
@@ -394,8 +398,7 @@ private object OfficialUpdateSound {
         if (!mayPlay(context) || PresidentialVictoryAudio.isPlaying()) return
         // Sons de apuração curtos não se sobrepõem aos easter eggs.
         CandidateEasterEggAudio.stop()
-        val resource = context.resources.getIdentifier("som_urna", "raw", context.packageName)
-        if (resource == 0) return
+        val resource = R.raw.som_urna
         try {
             activePlayer?.release()
             activePlayer = null
@@ -558,7 +561,7 @@ private object PresidentialVictoryCelebration {
     fun markSeen(prefs: SharedPreferences, number: Int) {
         if (number !in listOf(22, 13)) return
         // Persistir antes de fechar: reabrir o aplicativo não repetirá a festa.
-        prefs.edit().putInt(SHOWN, number).remove(PENDING).commit()
+        prefs.edit(commit = true) { putInt(SHOWN, number); remove(PENDING) }
     }
 }
 
@@ -939,7 +942,7 @@ private fun addEvolution(
             .put("ob", p.observedB).put("pa", p.projectedA)
             .put("pb", p.projectedB).put("pct", p.percentage))
     }
-    prefs.edit().putString("evolution_2026_$id", json.toString()).apply()
+    prefs.edit { putString("evolution_2026_$id", json.toString()) }
     return all
 }
 
@@ -1001,7 +1004,7 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("apuracao_v2", Context.MODE_PRIVATE)
         if (prefs.getBoolean("notificacao_projecao_ativa", false) && notificationsAllowed(this)) {
             runCatching { startProjectionService(this) }.onFailure {
-                prefs.edit().putBoolean("notificacao_projecao_ativa", false).apply()
+                prefs.edit { putBoolean("notificacao_projecao_ativa", false) }
             }
         }
         // Conteúdo edge-to-edge: o app ocupa toda a janela e controla seus próprios insets.
@@ -1143,8 +1146,10 @@ class ProjectionNotificationService : Service() {
                 val previous = preferences.getString("tse_gov_json_$uf", null)
                     ?.let { parseGovernorReport(it, uf) }
                 val freshTally = newGovernorTally(previous, result.report)
-                preferences.edit().putString("tse_gov_json_$uf", result.json)
-                    .putLong("tse_gov_last_ok", System.currentTimeMillis()).apply()
+                preferences.edit {
+                    putString("tse_gov_json_$uf", result.json)
+                    putLong("tse_gov_last_ok", System.currentTimeMillis())
+                }
                 val old = readEvolution(preferences, id)
                 addEvolution(preferences, id, old, governorEvolution(result.report, System.currentTimeMillis()))
                 if (freshTally) OfficialUpdateSound.playForFreshData(this, preferences)
@@ -1173,10 +1178,11 @@ class ProjectionNotificationService : Service() {
                 if (newPresidentialTally(previous, result.report)) soundOnUpdate = true
                 if (result.region == "BR" && PresidentialVictoryAudio.onNewOfficialReport(
                         this, preferences, previous, result.report)) victoryEvent = true
-                val editor = preferences.edit().putString("tse_json_${result.region}", result.json)
-                result.etag?.let { editor.putString("tse_etag_${result.region}", it) }
-                result.lastModified?.let { editor.putString("tse_modified_${result.region}", it) }
-                editor.apply()
+                preferences.edit {
+                    putString("tse_json_${result.region}", result.json)
+                    result.etag?.let { putString("tse_etag_${result.region}", it) }
+                    result.lastModified?.let { putString("tse_modified_${result.region}", it) }
+                }
                 newData = true
             } else if (result.errorCode == 403 || result.errorCode == 404 || result.errorCode == 429) {
                 backoffUntil[result.region] = System.currentTimeMillis() +
@@ -1184,7 +1190,7 @@ class ProjectionNotificationService : Service() {
             }
         }
         if (newData) {
-            preferences.edit().putLong("tse_last_ok", System.currentTimeMillis()).apply()
+            preferences.edit { putLong("tse_last_ok", System.currentTimeMillis()) }
             val official = TSE_LOCATIONS.mapNotNull { uf ->
                 preferences.getString("tse_json_$uf", null)?.let { json ->
                     parseTseReport(json, uf)?.let { uf to it }
@@ -1253,7 +1259,7 @@ class ProjectionNotificationService : Service() {
     }
 
     private fun endSession() {
-        preferences.edit().putBoolean("notificacao_projecao_ativa", false).apply()
+        preferences.edit { putBoolean("notificacao_projecao_ativa", false) }
         pollingJob?.cancel()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -1503,17 +1509,17 @@ private fun ElectionApp() {
     }
     val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
-            prefs.edit().putBoolean("notificacao_projecao_ativa", true).apply()
+            prefs.edit { putBoolean("notificacao_projecao_ativa", true) }
             notificationOn = true
             notificationError = false
             runCatching { startProjectionService(context) }.onFailure {
                 notificationOn = false
-                prefs.edit().putBoolean("notificacao_projecao_ativa", false).apply()
+                prefs.edit { putBoolean("notificacao_projecao_ativa", false) }
                 notificationError = true
             }
         } else {
             notificationOn = false
-            prefs.edit().putBoolean("notificacao_projecao_ativa", false).apply()
+            prefs.edit { putBoolean("notificacao_projecao_ativa", false) }
             notificationError = true
         }
     }
@@ -1557,18 +1563,20 @@ private fun ElectionApp() {
     fun changeNotifications(enabled: Boolean) {
         notificationError = false
         if (!enabled) {
-            prefs.edit().putBoolean("notificacao_projecao_ativa", false).apply()
+            prefs.edit { putBoolean("notificacao_projecao_ativa", false) }
             notificationOn = false
             stopProjectionService(context)
         } else if (notificationsAllowed(context)) {
-            prefs.edit().putBoolean("notificacao_projecao_ativa", true).apply()
+            prefs.edit { putBoolean("notificacao_projecao_ativa", true) }
             notificationOn = true
             runCatching { startProjectionService(context) }.onFailure {
                 notificationOn = false
                 notificationError = true
-                prefs.edit().putBoolean("notificacao_projecao_ativa", false).apply()
+                prefs.edit { putBoolean("notificacao_projecao_ativa", false) }
             }
-        } else if (Build.VERSION.SDK_INT >= 33) {
+        } else {
+            // O destino mínimo permanece Android 8; no Android atual esta permissão
+            // precisa ser solicitada quando a checagem anterior retornar false.
             permissionRequest.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
@@ -1579,7 +1587,7 @@ private fun ElectionApp() {
     }
     fun updateManual(updated: StateData) {
         manualStates = manualStates + (updated.uf to updated)
-        prefs.edit().putString("uf_${updated.uf}", updated.asJson()).apply()
+        prefs.edit { putString("uf_${updated.uf}", updated.asJson()) }
         refreshProjectionNotification(context)
     }
 
@@ -1831,20 +1839,20 @@ private fun ElectionApp() {
                 darkMode = darkMode,
                 onDarkModeChange = { enabled ->
                     darkMode = enabled
-                    prefs.edit().putBoolean("tema_escuro_2026", enabled).apply()
+                    prefs.edit { putBoolean("tema_escuro_2026", enabled) }
                 },
                 notificationEnabled = notificationOn,
                 soundEnabled = urnaSoundEnabled,
                 soundAvailable = OfficialUpdateSound.hasFile(context),
                 onSoundEnabledChange = { enabled ->
                     urnaSoundEnabled = enabled
-                    prefs.edit().putBoolean(OfficialUpdateSound.PREF_ENABLED, enabled).apply()
+                    prefs.edit { putBoolean(OfficialUpdateSound.PREF_ENABLED, enabled) }
                 },
                 onPreviewSound = { OfficialUpdateSound.preview(context) },
                 victorySoundEnabled = victorySoundEnabled,
                 onVictorySoundEnabledChange = { enabled ->
                     victorySoundEnabled = enabled
-                    prefs.edit().putBoolean(PresidentialVictoryAudio.PREF_ENABLED, enabled).apply()
+                    prefs.edit { putBoolean(PresidentialVictoryAudio.PREF_ENABLED, enabled) }
                 },
                 onPreviewVictorySound = { candidate ->
                     PresidentialVictoryAudio.preview(context, candidate)
@@ -1870,20 +1878,22 @@ private fun ElectionApp() {
                 onPresident = {
                     electionMode = "presidente"
                     tab = 0
-                    prefs.edit().putString("eleicao_2026", "presidente").apply()
+                    prefs.edit { putString("eleicao_2026", "presidente") }
                     refreshProjectionNotification(context)
                 },
                 onGovernor = { uf ->
                     electionMode = "governador"
                     selectedGovernorUF = uf
                     tab = 0
-                    prefs.edit().putString("eleicao_2026", "governador")
-                        .putString("governador_uf_2026", uf).apply()
+                    prefs.edit {
+                        putString("eleicao_2026", "governador")
+                        putString("governador_uf_2026", uf)
+                    }
                     refreshProjectionNotification(context)
                 },
                 onAutomaticChange = { enabled ->
                     manualMode = !enabled
-                    prefs.edit().putBoolean("modo_manual", !enabled).apply()
+                    prefs.edit { putBoolean("modo_manual", !enabled) }
                     refreshProjectionNotification(context)
                 },
                 onNotificationChange = { changeNotifications(it) },
@@ -1957,17 +1967,17 @@ private fun ElectionApp() {
                     0 -> GovernorDashboard(
                         Modifier.padding(padding), selectedGovernorUF, stateReport,
                         governorReports, govStatus,
-                        onChoose = { uf -> selectedGovernorUF = uf; prefs.edit().putString("governador_uf_2026", uf).apply() },
+                        onChoose = { uf -> selectedGovernorUF = uf; prefs.edit { putString("governador_uf_2026", uf) } },
                         onDetails = { tab = 1 }
                     )
                     1 -> GovernorRegions(
                         Modifier.padding(padding), selectedGovernorUF, governorReports,
                         govStatus, governorFailed,
-                        onSelect = { uf -> selectedGovernorUF = uf; prefs.edit().putString("governador_uf_2026", uf).apply() }
+                        onSelect = { uf -> selectedGovernorUF = uf; prefs.edit { putString("governador_uf_2026", uf) } }
                     )
                     2 -> GovernorMap(
                         Modifier.padding(padding), selectedGovernorUF, governorReports,
-                        onSelect = { uf -> selectedGovernorUF = uf; prefs.edit().putString("governador_uf_2026", uf).apply() },
+                        onSelect = { uf -> selectedGovernorUF = uf; prefs.edit { putString("governador_uf_2026", uf) } },
                         onDetails = { tab = 1 }
                     )
                     3 -> EvolutionPage(
@@ -2014,7 +2024,7 @@ private fun ElectionApp() {
                         colorA = Verde, colorB = Vermelho,
                         description = "Histórico dos valores digitados no aparelho. Não são dados oficiais do TSE.",
                         onClear = {
-                            prefs.edit().remove("evolution_2026_presidente_manual").apply()
+                            prefs.edit { remove("evolution_2026_presidente_manual") }
                             manualEvolution = emptyList()
                         }
                     )
@@ -2358,8 +2368,12 @@ private fun StableExpandableSheetBody(
     onTapOutsidePanel: () -> Unit,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val fullHeight = (androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp - 30.dp)
-        .coerceAtLeast(300.dp)
+    // O tamanho real do contêiner já considera a janela atual, inclusive rotação,
+    // barras de sistema e modo multi-janela. Evita saltos ao expandir o painel.
+    val windowInfo = LocalWindowInfo.current
+    val density = LocalDensity.current
+    val windowHeight = with(density) { windowInfo.containerSize.height.toDp() }
+    val fullHeight = (windowHeight - 30.dp).coerceAtLeast(300.dp)
     val compact = minOf(compactHeight, fullHeight)
     val panelHeight by animateDpAsState(
         targetValue = if (expanded) fullHeight else compact,
@@ -3240,7 +3254,7 @@ private fun GlassNavigationPill(
             label = "Indicador deslizando pela pílula"
         )
         Box(
-            Modifier.offset(x = selectedOffset, y = 5.dp)
+            Modifier.offset { IntOffset(selectedOffset.roundToPx(), 5.dp.roundToPx()) }
                 .width(widthPerItem).height(56.dp)
                 .padding(horizontal = 2.dp)
                 .clip(RoundedCornerShape(30.dp))
@@ -3745,7 +3759,7 @@ private fun StateSummaryRow(uf: String, data: Estimate, onClick: () -> Unit) {
 }
 
 @Composable
-private fun NumberField(title: String, value: String, onChange: (String) -> Unit, decimal: Boolean = false, modifier: Modifier = Modifier) {
+private fun NumberField(title: String, value: String, onChange: (String) -> Unit, modifier: Modifier = Modifier, decimal: Boolean = false) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(title, fontSize = 12.sp, color = Secundario, fontWeight = FontWeight.Medium, maxLines = 2)
         OutlinedTextField(
