@@ -288,11 +288,11 @@ private fun estimate(s: StateData): Estimate {
     }
 
     val result = Estimate(
-        a = va / p,
-        b = vb / p,
-        abst = ab / p,
-        brancos = br / p,
-        nulos = nu / p,
+        a = ElectionMath.projectVotes(va, apuracao),
+        b = ElectionMath.projectVotes(vb, apuracao),
+        abst = ElectionMath.projectVotes(ab, apuracao),
+        brancos = ElectionMath.projectVotes(br, apuracao),
+        nulos = ElectionMath.projectVotes(nu, apuracao),
         urnas = apuracao,
         eleitores = electorate,
         valid = va + vb > 0,
@@ -514,24 +514,19 @@ private data class TseReport(
 private data class MathematicalVictory(val candidateNumber: Int, val complete: Boolean)
 
 private fun mathematicalVictory(report: TseReport?): MathematicalVictory? {
-    if (report == null || report.location != "BR" || !report.hasVotes) return null
-    if (report.sectionsTotal <= 0L || report.sectionsDone !in 1L..report.sectionsTotal) return null
-    if (report.candidate22 == report.candidate13) return null
-    if (report.electorate <= 0L || report.turnout < report.validVotes ||
-        report.turnout > report.electorate) return null
-    if (report.officialValidVotes > 0L && report.validVotes > report.officialValidVotes) return null
-    if (report.totalBallots > 0L && report.validVotes > report.totalBallots) return null
-    val leader = if (report.candidate22 > report.candidate13) 22 else 13
-    // Eleitorado - comparecimento JÁ contado: limite máximo (superestimado) de
-    // votos que ainda poderiam ser dados ao adversário. Inclui até quem se
-    // absteve nas seções apuradas, então jamais depende da projeção regional.
-    val outstandingUpperBound = report.electorate - report.turnout
-    val lead = kotlin.math.abs(report.candidate22 - report.candidate13)
-    val complete = report.sectionsDone == report.sectionsTotal
-    if (complete || lead > outstandingUpperBound) {
-        return MathematicalVictory(leader, complete)
-    }
-    return null
+    report ?: return null
+    val winner = ElectionMath.irreversibleWinner(
+        location = report.location,
+        votes22 = report.candidate22,
+        votes13 = report.candidate13,
+        sectionsDone = report.sectionsDone,
+        sectionsTotal = report.sectionsTotal,
+        electorate = report.electorate,
+        turnout = report.turnout,
+        officialValidVotes = report.officialValidVotes,
+        totalBallots = report.totalBallots
+    ) ?: return null
+    return MathematicalVictory(winner, report.sectionsDone == report.sectionsTotal)
 }
 
 // Comemoração presidencial pendente: gravada SOMENTE quando o registro oficial
@@ -4695,17 +4690,22 @@ private fun BrazilStateMap(
         scale = nextScale
     }
 
-    val gestureState = rememberTransformableState { zoomChange, panChange, _ ->
+    // API atual do Compose com centroide da pinça. Mantém o ponto sob os dedos
+    // estável ao ampliar/reduzir (em vez de aplicar zoom ao centro da tela).
+    val gestureState = rememberTransformableState { centroid, zoomChange, panChange, _ ->
         val nextScale = (scale * zoomChange).coerceIn(1f, 6f)
         if (nextScale <= 1.001f) {
             scale = 1f
             offset = Offset.Zero
         } else {
             val ratio = nextScale / scale
-            offset = limitMapPan(
-                Offset(offset.x * ratio + panChange.x, offset.y * ratio + panChange.y),
-                nextScale, viewport
+            val viewCenter = Offset(viewport.width / 2f, viewport.height / 2f)
+            val focal = centroid - viewCenter
+            val nextOffset = Offset(
+                focal.x - (focal.x - offset.x) * ratio + panChange.x,
+                focal.y - (focal.y - offset.y) * ratio + panChange.y
             )
+            offset = limitMapPan(nextOffset, nextScale, viewport)
             scale = nextScale
         }
     }
