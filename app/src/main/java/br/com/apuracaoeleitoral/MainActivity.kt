@@ -59,6 +59,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -103,6 +105,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import org.json.JSONObject
 import org.json.JSONArray
@@ -3174,6 +3177,8 @@ private fun GovernorMap(
             BrazilStateMap(geometry, colors, selected,
                 onSelected = { uf -> if (uf in GOVERNOR_UFS) onSelect(uf) },
                 colorA = GovernorBlue, colorB = GovernorPurple)
+            Text("Use dois dedos para dar zoom; arraste para explorar. Dois toques ampliam e ↺ restaura o mapa.",
+                fontSize = 11.sp, color = Secundario)
             Text("Azul e roxo representam o primeiro e o segundo candidato por número eleitoral em cada estado.",
                 fontSize = 12.sp, color = Secundario)
             Text("Cinza = sem disputa estadual ou sem votos disponíveis.", fontSize = 12.sp, color = Secundario)
@@ -3486,6 +3491,16 @@ private fun winningMapColor(
     return lerp(soft, winner, strength)
 }
 
+// Limita o deslocamento para que a área visível nunca saia completamente do mapa.
+// As coordenadas do deslocamento são pixels na tela; o zoom é aplicado ao desenho,
+// e a conversão inversa é usada nos toques para identificar a UF corretamente.
+private fun limitMapPan(offset: Offset, scale: Float, viewport: IntSize): Offset {
+    if (scale <= 1.001f || viewport.width == 0 || viewport.height == 0) return Offset.Zero
+    val maxX = (viewport.width * (scale - 1f) / 2f).coerceAtLeast(0f)
+    val maxY = (viewport.height * (scale - 1f) / 2f).coerceAtLeast(0f)
+    return Offset(offset.x.coerceIn(-maxX, maxX), offset.y.coerceIn(-maxY, maxY))
+}
+
 @Composable
 private fun BrazilStateMap(
     geometry: List<UfOutline>,
@@ -3497,46 +3512,155 @@ private fun BrazilStateMap(
 ) {
     val mapPalette = LocalAppPalette.current
     val mapSelectedBorder = Azul
-    // Bordas de alto contraste: eram quase invisíveis sobre o fundo claro.
+    // Bordas nítidas sobre os fundos claro e escuro, mesmo após dar zoom.
     val mapOutline = if (mapPalette == DarkPalette) Color(0xFF6A7F9B)
         else Color(0xFF69788C)
-    Canvas(
+
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    var viewport by remember { mutableStateOf(IntSize.Zero) }
+    // Mantemos os detectores de toque independentes do gesto de zoom/panorâmica.
+    val latestScale by rememberUpdatedState(scale)
+    val latestOffset by rememberUpdatedState(offset)
+
+    fun zoomTo(target: Float, focal: Offset? = null) {
+        val nextScale = target.coerceIn(1f, 6f)
+        if (nextScale <= 1.001f) {
+            scale = 1f
+            offset = Offset.Zero
+            return
+        }
+        val ratio = nextScale / scale
+        val center = Offset(viewport.width / 2f, viewport.height / 2f)
+        // Se o zoom foi acionado com dois toques, mantém o ponto tocado sob o dedo.
+        val focused = focal ?: center
+        val relative = focused - center
+        val candidate = Offset(
+            relative.x - (relative.x - offset.x) * ratio,
+            relative.y - (relative.y - offset.y) * ratio
+        )
+        offset = limitMapPan(candidate, nextScale, viewport)
+        scale = nextScale
+    }
+
+    val gestureState = rememberTransformableState { zoomChange, panChange, _ ->
+        val nextScale = (scale * zoomChange).coerceIn(1f, 6f)
+        if (nextScale <= 1.001f) {
+            scale = 1f
+            offset = Offset.Zero
+        } else {
+            val ratio = nextScale / scale
+            offset = limitMapPan(
+                Offset(offset.x * ratio + panChange.x, offset.y * ratio + panChange.y),
+                nextScale, viewport
+            )
+            scale = nextScale
+        }
+    }
+
+    Box(
         modifier = Modifier.fillMaxWidth().aspectRatio(1f)
             .clip(RoundedCornerShape(14.dp))
             .background(mapPalette.mapBackground)
-            .pointerInput(geometry) {
-                detectTapGestures { tap ->
-                    val square = min(size.width, size.height).toFloat() * 0.95f
-                    val left = (size.width - square) / 2f
-                    val top = (size.height - square) / 2f
-                    val geo = Offset(
-                        (tap.x - left) / square * 10000f,
-                        10000f - (tap.y - top) / square * 10000f
-                    )
-                    // Reversed order lets small polygons (DF, SE etc.) win near borders.
-                    geometry.asReversed().firstOrNull { insidePolygon(geo, it.points) }
-                        ?.let { onSelected(it.uf) }
-                }
-            }
+            .onSizeChanged { viewport = it }
+            // Quando o zoom é 1x, um dedo continua rolando a página normalmente.
+            // Com zoom ativo, o mesmo movimento passa a arrastar o mapa.
+            .transformable(state = gestureState, canPan = { scale > 1.01f })
     ) {
-        val square = min(size.width, size.height) * 0.95f
-        val left = (size.width - square) / 2f
-        val top = (size.height - square) / 2f
-        geometry.forEach { state ->
-            val path = Path()
-            state.points.forEachIndexed { i, point ->
-                val x = left + point.x / 10000f * square
-                val y = top + (10000f - point.y) / 10000f * square
-                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        Canvas(
+            modifier = Modifier.matchParentSize()
+                .pointerInput(geometry) {
+                    detectTapGestures(
+                        onDoubleTap = { tap ->
+                            val target = when {
+                                latestScale < 1.5f -> 2.6f
+                                latestScale < 4f -> 4.8f
+                                else -> 1f
+                            }
+                            zoomTo(target, focal = tap)
+                        },
+                        onTap = { tap ->
+                            val square = min(size.width, size.height).toFloat() * 0.95f
+                            val left = (size.width - square) / 2f
+                            val top = (size.height - square) / 2f
+                            val center = Offset(size.width / 2f, size.height / 2f)
+                            val unzoomed = Offset(
+                                center.x + (tap.x - center.x - latestOffset.x) / latestScale,
+                                center.y + (tap.y - center.y - latestOffset.y) / latestScale
+                            )
+                            val geo = Offset(
+                                (unzoomed.x - left) / square * 10000f,
+                                10000f - (unzoomed.y - top) / square * 10000f
+                            )
+                            geometry.asReversed().firstOrNull { insidePolygon(geo, it.points) }
+                                ?.let { onSelected(it.uf) }
+                        }
+                    )
+                }
+        ) {
+            val square = min(size.width, size.height) * 0.95f
+            val left = (size.width - square) / 2f
+            val top = (size.height - square) / 2f
+            val center = Offset(size.width / 2f, size.height / 2f)
+            geometry.forEach { state ->
+                val path = Path()
+                state.points.forEachIndexed { i, point ->
+                    val baseX = left + point.x / 10000f * square
+                    val baseY = top + (10000f - point.y) / 10000f * square
+                    val x = center.x + (baseX - center.x) * scale + offset.x
+                    val y = center.y + (baseY - center.y) * scale + offset.y
+                    if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                }
+                path.close()
+                drawPath(path, color = winningMapColor(estimates.getValue(state.uf), colorA, colorB,
+                    mapPalette.emptyState, dark = mapPalette == DarkPalette))
+                drawPath(
+                    path,
+                    color = if (selected == state.uf) mapSelectedBorder else mapOutline,
+                    style = Stroke(width = if (selected == state.uf) 2.8.dp.toPx() else 1.15.dp.toPx())
+                )
             }
-            path.close()
-            drawPath(path, color = winningMapColor(estimates.getValue(state.uf), colorA, colorB,
-                mapPalette.emptyState, dark = mapPalette == DarkPalette))
-            drawPath(
-                path,
-                color = if (selected == state.uf) mapSelectedBorder else mapOutline,
-                style = Stroke(width = if (selected == state.uf) 2.8.dp.toPx() else 1.15.dp.toPx())
-            )
+        }
+
+        // Controles também permitem usar o zoom sem gestos multitoque.
+        Surface(
+            modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+            color = mapPalette.surface.copy(alpha = 0.94f),
+            shape = RoundedCornerShape(50.dp),
+            border = BorderStroke(1.dp, mapPalette.border),
+            shadowElevation = 3.dp
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = { zoomTo(scale / 1.6f) },
+                    enabled = scale > 1.01f,
+                    modifier = Modifier.size(38.dp).semantics {
+                        contentDescription = "Diminuir zoom do mapa"
+                    }
+                ) { Text("−", fontSize = 23.sp, color = if (scale > 1.01f) mapPalette.text else mapPalette.secondary) }
+                Text(
+                    "${(scale * 100).toInt()}%",
+                    modifier = Modifier.width(46.dp),
+                    color = mapPalette.text,
+                    textAlign = TextAlign.Center,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 11.sp
+                )
+                IconButton(
+                    onClick = { zoomTo(scale * 1.6f) },
+                    enabled = scale < 5.99f,
+                    modifier = Modifier.size(38.dp).semantics {
+                        contentDescription = "Aumentar zoom do mapa"
+                    }
+                ) { Text("+", fontSize = 22.sp, color = if (scale < 5.99f) mapPalette.text else mapPalette.secondary) }
+                IconButton(
+                    onClick = { zoomTo(1f) },
+                    enabled = scale > 1.01f,
+                    modifier = Modifier.size(38.dp).semantics {
+                        contentDescription = "Restaurar mapa para 100 por cento"
+                    }
+                ) { Text("↺", fontSize = 23.sp, color = if (scale > 1.01f) mapPalette.text else mapPalette.secondary) }
+            }
         }
     }
 }
@@ -3568,6 +3692,8 @@ private fun MapPage(
                 Text("$reported/27 UFs", fontSize = 12.sp, color = Secundario)
             }
             BrazilStateMap(geometry, computed, picked, onSelected = { picked = it })
+            Text("Aproxime dois dedos ou toque em + para ampliar. Arraste para explorar e use ↺ para restaurar.",
+                fontSize = 11.sp, color = Secundario)
             Text(
                 if (manualMode) "Cor do candidato à frente, com intensidade conforme os votos digitados em cada UF."
                 else "Cor do candidato à frente, com intensidade conforme os votos oficiais apurados em cada UF.",
