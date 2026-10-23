@@ -2341,6 +2341,10 @@ private fun StableExpandableSheetBody(
     }
 }
 
+// Controles de diagnóstico ficam ocultos na versão usada durante a apuração.
+// Não altera sons automáticos, triplo toque, vitória matemática ou comemoração.
+private const val SHOW_DEBUG_TESTS_IN_OPTIONS = false
+
 // Menu compacto de preferências acessível pelos três pontos ou pelo subtítulo.
 // Todas as opções permanecem disponíveis, mas fora da área dos resultados.
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2571,12 +2575,14 @@ private fun ElectionOptionsSheet(
                         Text("Arquivo som_urna.mp3 ainda não incluído no aplicativo.",
                             fontSize = 11.sp, color = Aviso)
                     }
-                    OutlinedButton(
-                        onClick = { soundTestMessage = onPreviewSound() },
-                        modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)
-                    ) { Text("▶ Ouvir som de teste", fontSize = 12.sp) }
-                    if (soundTestMessage.isNotBlank()) {
-                        Text(soundTestMessage, fontSize = 11.sp, color = Secundario)
+                    if (SHOW_DEBUG_TESTS_IN_OPTIONS) {
+                        OutlinedButton(
+                            onClick = { soundTestMessage = onPreviewSound() },
+                            modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)
+                        ) { Text("▶ Ouvir som de teste", fontSize = 12.sp) }
+                        if (soundTestMessage.isNotBlank()) {
+                            Text(soundTestMessage, fontSize = 11.sp, color = Secundario)
+                        }
                     }
                     HorizontalDivider(color = Borda)
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -2590,29 +2596,31 @@ private fun ElectionOptionsSheet(
                             onCheckedChange = onVictorySoundEnabledChange,
                             colors = SwitchDefaults.colors(checkedTrackColor = Azul))
                     }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = {
-                            soundTestMessage = onPreviewVictorySound(22)
-                        }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
-                            Text("▶ Testar Flávio", fontSize = 11.sp)
+                    if (SHOW_DEBUG_TESTS_IN_OPTIONS) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = {
+                                soundTestMessage = onPreviewVictorySound(22)
+                            }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
+                                Text("▶ Testar Flávio", fontSize = 11.sp)
+                            }
+                            OutlinedButton(onClick = {
+                                soundTestMessage = onPreviewVictorySound(13)
+                            }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
+                                Text("▶ Testar Lula", fontSize = 11.sp)
+                            }
                         }
-                        OutlinedButton(onClick = {
-                            soundTestMessage = onPreviewVictorySound(13)
-                        }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
-                            Text("▶ Testar Lula", fontSize = 11.sp)
-                        }
-                    }
-                    HorizontalDivider(color = Borda)
-                    Text("Prévia da comemoração (simulação)",
-                        fontSize = 12.sp, color = Secundario)
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { onPreviewCelebration(22) },
-                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
-                            Text("🎆 Flávio", fontSize = 11.sp)
-                        }
-                        OutlinedButton(onClick = { onPreviewCelebration(13) },
-                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
-                            Text("🎆 Lula", fontSize = 11.sp)
+                        HorizontalDivider(color = Borda)
+                        Text("Prévia da comemoração (simulação)",
+                            fontSize = 12.sp, color = Secundario)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { onPreviewCelebration(22) },
+                                modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
+                                Text("🎆 Flávio", fontSize = 11.sp)
+                            }
+                            OutlinedButton(onClick = { onPreviewCelebration(13) },
+                                modifier = Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
+                                Text("🎆 Lula", fontSize = 11.sp)
+                            }
                         }
                     }
                     if (notificationError) {
