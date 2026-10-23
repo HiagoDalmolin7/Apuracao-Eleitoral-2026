@@ -101,6 +101,7 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.lerp
@@ -127,6 +128,8 @@ import kotlin.random.Random
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.floor
+import kotlin.math.ceil
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
@@ -4163,7 +4166,7 @@ private fun SummaryLine(label: String, value: String) {
 // Os polígonos são embarcados no app (não há necessidade de internet ou API).
 private const val BR_MAP_GZIP_BASE64 = "H4sIAAAAAAAC/21Zy64dtxH8F605AN+P7GxZMRJEsSB5d6GFEQiBF0EAJ7sg/5569Bxd+cSAcOdwOGSzu7q6mv7Pm79/+ec/vvz7t1+//OvNH15e3nz39k16yamk+vlzws+/4GdLPY00PfAeAyvtdFLJ6SqpFI9/wHipqTT9/P47/LxmKj2VkQoeVio7lZNqThWr11Q98+07zKw91ZHqTHWlulM9evXDH7l51vO7T3wuqVVsulLzxz/+xNGeLizZRmozNbzbqXmB97Si59RL6jV1f/P+R5oGY66Gg/XUR+oTPziAv7CvL0/kllc76eor9Z36SSOn4fO+/xkvB43BUEsDNmCjCyNjaMIHeQA7DyzK1/h6pYFdCqbbvg/fY87MaRbsO9O0zz/QI7Ola2G0p8nj4fF++ye+HRjDUvqLmXG0Dx/5DgutNHeasHzYex//zKjBPhz2gguXD/HxrxzGIbhbtd0ff5J7YBGOtTjuYS590fydVvcQ/bNGWkbGp7cK+UkLxq6Z1vbwO32YFqwp3uITsbJhDey8Ov0LF4VJP2t7wONCPK/Bf5yEHT+nN7/89jeh9AVhmxvIwDJ703edj4dLGS8vZQMss7SJH4OnKDG88WmBIQzOYdwBYBqI6XXjqQM//HsVOsULwMcCOucB0L1qDNjmy7XTXvoA1pZDSy7EtGSvQqh6pA8PyFgcO2s94EOWnYNDz7a038BJvFLJzLKiHeXC7OUanYMnxMkvqzDspQYOhn8ah5VVK1V83WxB9V/ko22El/UAqPWjuUhQL4ojhUcPfAeIlhUG9rC7YOFZJ5csgE2pPFflmqVxLg3gokoW/uYpOFAQ/qJXhLHWBRCqTpUB+uIN6sotHe9bAOvraJXKbBsyhulTCg9Z4WZksM+L1T01I0LasCpfu8aQmDXcosAchOxwpJ6eRAAvbSNKe8lbixbqy87dtN7IlWmo3UalxTgSj8NtmvIG7ANGmmutO2oR4UWw+oCtIIlmO4YHAOagIEFqjkA1uw5PZIp2jM/sgGo3vW4Y8iokB5zRJjySBS45K84gS0mBpWSFDrSrhRt4rCw9IeDKiYKhHfBFOlYjDplweJaKzQLakVg80MU5XIkmdlQAAeRwDt/g4VKeMfRTux1BhtMG/N6OwTzzRrnZQhUolh4cikPzCbWdMlXnIWEau4RrqbYnD2cbSkXZDm7fi7DaIghbR6ZeNzouvmDWygGMrnw9yfO0v2rFhtCMXeWjRUDKzYLIckqR9cwJUzn9+1QSbEQ8+IgD5PN9AsFObgR663gkSgEdLGxXszz5uKwWXIf7mLYKa9o83rJh3TFXv+mMYBFwczAU3e99G4FlhBNu3rrQ4f5Gx3OSsfY6j1TDloOkHOWue2EYgbWF8G/JTos9EZKe5ZmqoqowQVZwBBWqKIigmWOKrUHge+6JhH18wB9GI89dhwrhyyowrC9Fo6XwOgZZx7vzlY9GwsqbNdwptCkVlBCIcF33coDrzNX5T5h2AR+1xPAAp0WUOzmNT2QRQX6z9mtF2HTaV+yU4a90rIbiMXszsgnn6sIDTKjMRZjrIHsLbyffyKHs6fbW1fcNBmU8i6jFARAAml3dlL+pAwILrAvT3j0ZsV3Z9WFwAzlXZd+xDbh6MmI48Z9DsZxiqI6IsiZXcnSw+B6NukSETYIx+BBYHQZUACmmjyBHRsnhFAB4nTxvSlM8xW3jeUYjlz2IpDqITMri2kQsi6uLUljcsjPZv8kltd8nQMk7SuNt2uUporTuDne1EvkJ/nf8k/MK3imBbwgB5JUcCWVbVFYL5+sE0LrN/kQZEuKL0UJJZO8hmKPdKWinqeAD8f8ntxjnKIE0OhQKHl14JP2c23xtrtwiE41SZ7Wvrx2ycRZ0f1tV9lGRLOXiuiXLNwlVsxQ1LaT396MM9fHka8T/9jl4LFRM+JxB+P18MmtUFsrFUsstjQLupwcLnh1BBq6rORzx5/JRTgZKCfoEww+2pxA0KM3FChtysZGbXGWBZqkCrFGzpAlSsfaH2tmuG5YOKPoWTnwYkVOziwokdCrl4xBkEJIqFqvIHMwJjwIauynXmmlAMadLtRXT7DK5I8fXUEmatwBg3Q38VRi3zgjlx9Bo0aJGot+JellAIeozSH6LLxS7/tAVtT5qQ5GMFPk3mjL2E0NiZaT1tIOB5nGvbFUBdVSs19UtWqIGJItKT76jZjVN9h93+a45W5jOtMtTql2EqYUKS70CS0QvV2hqJ88imkfkW3ViqDUL5lkdeKjHEr5n1WEDFvV+GXT78EQBKjgesmQIq8VtzjdFqHMf01cm9/YI+OsvEQZq2vWq+8jjRiSAtUPQU4M4GEcI0SMV111MRkZAaz/5rtvNIaArQhAhuN1xHqCgoj6GvKaD4ehDfAU3jai7nYoeBXvFuAtDYf0V60jVa/HKShZQjcZF+lxIY8clUc5C5pVbO2AUSFItQ2O3RG1zZSDhalnQ33mS1FS86N2UmFOhDgKeGdVulsBSE+cf0yigcZ7OhPyCuRKiTEyT87p1dwupK87xoVjWrSSi4EtLm05XSbs+JT8batfn0tm+OZ8k4CQL2DRf1rkq97mGJh2hBtmTR+193ZpMhcuj8D1wqXrBYiTE1M2aYiwg4xQuMkJ90td0jtgTYdr3tCJnDF4S3H2XygvafKtBdkHFtx7oYnmdcQQ9nWzVGAdm5jLAAO1oYfLd+KkHtfPK1xwmVdgfohr5KPpeFCNdC/Bld1dzbtV4IY9iLd5FlOhyKZjmk8wR5dkpvKYyTVPtn0fLrRpU6AvlJvLDvNgkuJ7Px01br8/CDuKyhBZOM9Dt5Cvmcv7cTwRe2Aj0/UQFe5S7GApRvrhoWd1HVNHJG7USEl5q6NzI3Ox4j0spGgs5mj5S/tG/t5a8i6tuZDxfOuHRLOxhSY32MgirHKZMuX1YAuyssrIci+cH1fLmz/UHeeqWfeqOTGlp1ceLpcvRZT+7ntUYL+8EjSpWzI+Ge96CN0QJ7y1VrlVs2t2yDAtuXtU51elS7wjytljmsS51zrwgc3GUU/uTxJbqmHpCoROd8gaku7/kzr5w+4b/YNd9A1NqXMrAfWbyzi7jOFsYYyO0AlTV9ympzyCiHDLg9d0J+vXxSkNFE4QUf0RmRvup1XQv10JoXBYk0t1ULD3d3aFCP3mtG5cpLrVAnYAuBpUob6yWI8jUmEcidfEXenVdwdzRovIYDzxWyftxC3mBfodozO7OlaU5rhWiYo2i5HKDr8vSppiTZB0FUbhL/OPqgTVkRu5wQgmlWgj+FvcxUmau01QSO7od8WDc+qk6xSUfOXNbOwLqEQTYfNdiXU9Gi1zvnouQFEFlGRSXggLU5VkenGrx42bmxj0+FmABBLeemdwo743A/Lhvfnj4GnR87sXGoUAI5dbvtG9URepHu+7Di5QNwOYb8284hck145qVdrl7ZRBXNLbR4uo2weeqQ3VvPMcPe7T2fLkpdo9WJ9/6IhpSytvq/zvxLcnodiru8m5BpJv/Hl4O2mqPxSUArWOb7vyIkM///R/DdvFrPRkAAA=="
 
-// === Aba Gráfico: somente a evolução da porcentagem FINAL projetada ===
+// === Aba Gráfico: porcentagens projetadas e comparação votos apurados x projetados ===
 // O histórico existente é preservado: as porcentagens são calculadas a partir
 // dos votos finais projetados em cada atualização (e NÃO dos votos já apurados).
 private data class ProjectionPercentPoint(
@@ -4201,8 +4204,9 @@ private fun EvolutionPage(
     ContentColumn(modifier) {
         Text("Evolução da projeção", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Tinta)
         Text(title, fontSize = 14.sp, color = Secundario)
-        Note(description + " O gráfico mostra a porcentagem final estimada de cada candidato, " +
-            "não a porcentagem dos votos já apurados.")
+        Note(description + " Use as abas Percentuais e Votos para comparar a evolução. " +
+            "No gráfico de votos, traços contínuos representam os votos apurados e " +
+            "traços pontilhados mostram os votos finais projetados (estimativas não oficiais).")
         if (percentHistory.isEmpty()) {
             SurfaceCard {
                 Text("Aguardando dados de projeção", fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -4223,7 +4227,7 @@ private fun EvolutionPage(
                 }
                 Text("${percentHistory.size} atualização(ões) no histórico", fontSize = 12.sp, color = Secundario)
             }
-            ProjectionPercentChart(percentHistory, nameA, nameB, colorA, colorB)
+            ProjectionPercentChart(points, nameA, nameB, colorA, colorB)
             if (percentHistory.size == 1) {
                 Note("O primeiro registro já está no gráfico. A linha aparecerá depois que houver " +
                     "uma nova atualização dos resultados.")
@@ -4265,78 +4269,312 @@ private fun ProjectionPercentNumber(name: String, value: Double, tint: Color, mo
     }
 }
 
+// Os dois modos utilizam o mesmo histórico original (votos reais e estimados separados).
+// A escala percentual é ajustada aos pontos VISÍVEIS: se estiver 50,01% x 49,99%,
+// ambos continuam na posição matemática exata, mas sem o desperdício de 0–100% vertical.
+private data class ChartAxisRange(val low: Double, val high: Double)
+
+private fun evolutionAxis(
+    history: List<EvolutionPoint>, percentMode: Boolean,
+    firstVisible: Int, lastVisible: Int
+): ChartAxisRange {
+    if (history.isEmpty()) return ChartAxisRange(0.0, if (percentMode) 100.0 else 1.0)
+    val inFrame = history.subList(firstVisible.coerceIn(0, history.lastIndex),
+        (lastVisible + 1).coerceIn(firstVisible.coerceIn(0, history.lastIndex) + 1, history.size))
+    return if (percentMode) {
+        val values = inFrame.flatMap { p ->
+            val total = (p.projectedA + p.projectedB).coerceAtLeast(1.0)
+            listOf(p.projectedA / total * 100.0, p.projectedB / total * 100.0)
+        }
+        val lo = values.minOrNull() ?: 49.0
+        val hi = values.maxOrNull() ?: 51.0
+        val padding = maxOf(0.12, (hi - lo) * 0.22)
+        val lower = (lo - padding).coerceAtLeast(0.0)
+        val upper = (hi + padding).coerceAtMost(100.0)
+        if (upper - lower < 0.2) ChartAxisRange((50.0 - 0.15).coerceAtMost(lower),
+            (50.0 + 0.15).coerceAtLeast(upper))
+        else ChartAxisRange(lower, upper)
+    } else {
+        // Mesma unidade em todas as linhas: votos absolutos, nunca % misturados.
+        val highest = inFrame.maxOfOrNull { p ->
+            maxOf(p.observedA, p.observedB, p.projectedA, p.projectedB)
+        } ?: 1.0
+        ChartAxisRange(0.0, (highest * 1.08).coerceAtLeast(1.0))
+    }
+}
+
+private fun compactVoteAxis(value: Double): String = when {
+    value >= 1_000_000_000 -> String.format(PtBr, "%.1f bi", value / 1_000_000_000)
+    value >= 1_000_000 -> String.format(PtBr, "%.1f mi", value / 1_000_000)
+    value >= 1_000 -> String.format(PtBr, "%.0f mil", value / 1_000)
+    else -> "${value.toLong()}"
+}
+
+private fun percentAxisText(value: Double, spread: Double): String = when {
+    spread < 2 -> String.format(PtBr, "%.2f%%", value)
+    spread < 15 -> String.format(PtBr, "%.1f%%", value)
+    else -> String.format(PtBr, "%.0f%%", value)
+}
+
 @Composable
 private fun ProjectionPercentChart(
-    points: List<ProjectionPercentPoint>,
+    points: List<EvolutionPoint>,
     nameA: String,
     nameB: String,
     colorA: Color,
     colorB: Color
 ) {
+    val history = remember(points) { points.filter { p ->
+        p.observedA.isFinite() && p.observedB.isFinite() &&
+            p.projectedA.isFinite() && p.projectedB.isFinite() &&
+            p.observedA >= 0 && p.observedB >= 0 && p.projectedA >= 0 &&
+            p.projectedB >= 0 && p.projectedA + p.projectedB > 0
+    } }
+    if (history.isEmpty()) return
+
+    var percentMode by remember { mutableStateOf(true) }
+    var zoom by remember { mutableFloatStateOf(1f) }
+    var viewportPx by remember { mutableFloatStateOf(1f) }
+    var centerIndex by remember { mutableFloatStateOf((history.lastIndex) / 2f) }
+    var selectedIndex by remember { mutableIntStateOf(history.lastIndex) }
+
+    fun boundsCenter(targetZoom: Float, proposed: Float): Float {
+        if (history.size <= 1) return 0f
+        val half = history.lastIndex / (2f * targetZoom)
+        return proposed.coerceIn(half, history.lastIndex - half)
+    }
+    fun zoomAt(factor: Float, focalX: Float = viewportPx / 2f) {
+        val target = (zoom * factor).coerceIn(1f, 8f)
+        if (target <= 1.001f) {
+            zoom = 1f
+            centerIndex = history.lastIndex / 2f
+            return
+        }
+        if (history.size <= 1) { zoom = target; return }
+        val oldStep = viewportPx / history.lastIndex * zoom
+        val newStep = viewportPx / history.lastIndex * target
+        val at = centerIndex + (focalX - viewportPx / 2f) / oldStep.coerceAtLeast(1f)
+        centerIndex = boundsCenter(target,
+            at - (focalX - viewportPx / 2f) / newStep.coerceAtLeast(1f))
+        zoom = target
+    }
+
+    // Quando chegam novos dados (ou a próxima etapa do simulador), mostrar o mais recente.
+    LaunchedEffect(history.size) {
+        selectedIndex = history.lastIndex
+        centerIndex = boundsCenter(zoom, history.lastIndex.toFloat())
+    }
+    val transform = rememberTransformableState { centroid, pinch, pan, _ ->
+        zoomAt(pinch, centroid.x)
+        if (zoom > 1.01f && history.size > 1) {
+            val pixelsPerPoint = viewportPx / history.lastIndex * zoom
+            centerIndex = boundsCenter(zoom,
+                centerIndex - pan.x / pixelsPerPoint.coerceAtLeast(1f))
+        }
+    }
+
+    val half = if (history.size > 1) history.lastIndex / (2f * zoom) else 0f
+    val start = floor(centerIndex - half).toInt().coerceIn(0, history.lastIndex)
+    val end = ceil(centerIndex + half).toInt().coerceIn(start, history.lastIndex)
+    val axis = remember(history, percentMode, start, end) {
+        evolutionAxis(history, percentMode, start, end)
+    }
+    val selected = history[selectedIndex.coerceIn(0, history.lastIndex)]
+    val selectedSum = (selected.projectedA + selected.projectedB).coerceAtLeast(1.0)
+    val darkSurface = LocalAppPalette.current.surface
+    val grid = Borda
+    val textSecondary = Secundario
+    val textPrimary = Tinta
+
     SurfaceCard {
-        Text("Porcentagem projetada ao longo do tempo", fontSize = 17.sp,
+        Text("Evolução da apuração", fontSize = 19.sp,
             fontWeight = FontWeight.Bold, color = Tinta)
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            FilterChip(
+                selected = percentMode,
+                onClick = { percentMode = true; zoom = 1f; centerIndex = history.lastIndex / 2f },
+                label = { Text("Percentuais", fontSize = 12.sp) }
+            )
+            FilterChip(
+                selected = !percentMode,
+                onClick = { percentMode = false; zoom = 1f; centerIndex = history.lastIndex / 2f },
+                label = { Text("Votos", fontSize = 12.sp) }
+            )
+        }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             ProjectionLegend(nameA, colorA, Modifier.weight(1f))
             ProjectionLegend(nameB, colorB, Modifier.weight(1f))
         }
-        Row(Modifier.fillMaxWidth().height(240.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            Column(
-                modifier = Modifier.width(39.dp).fillMaxHeight(),
+        if (!percentMode) {
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(15.dp)) {
+                Text("━━ apurados", fontSize = 11.sp, color = Secundario)
+                Text("┄┄┄ projetados", fontSize = 11.sp, color = Secundario)
+            }
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(if (percentMode) "Escala automática • aproxima disputas acirradas"
+                 else "Mesma escala para votos apurados e projetados",
+                modifier = Modifier.weight(1f), fontSize = 11.sp, color = Secundario)
+            IconButton(onClick = { zoomAt(1f / 1.7f) }, enabled = zoom > 1.01f,
+                modifier = Modifier.size(36.dp)) {
+                Text("−", fontSize = 22.sp, color = if (zoom > 1.01f) Tinta else Secundario)
+            }
+            Text(String.format(PtBr, "%.1f×", zoom), fontSize = 12.sp,
+                color = Tinta, fontWeight = FontWeight.Bold)
+            IconButton(onClick = { zoomAt(1.7f) }, enabled = zoom < 7.99f,
+                modifier = Modifier.size(36.dp)) {
+                Text("+", fontSize = 20.sp, color = if (zoom < 7.99f) Tinta else Secundario)
+            }
+            IconButton(onClick = { zoom = 1f; centerIndex = history.lastIndex / 2f },
+                modifier = Modifier.size(36.dp)) {
+                Text("↺", fontSize = 20.sp, color = Tinta)
+            }
+        }
+        // Antes eram 240dp, agora são 420dp e podemos ampliar o intervalo horizontal.
+        val graphHeight = 420.dp
+        Row(Modifier.fillMaxWidth().height(graphHeight), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(Modifier.width(58.dp).fillMaxHeight(),
                 verticalArrangement = Arrangement.SpaceBetween,
-                horizontalAlignment = Alignment.End
-            ) {
-                listOf("100%", "75%", "50%", "25%", "0%").forEach { label ->
-                    Text(label, fontSize = 10.sp, color = Secundario)
+                horizontalAlignment = Alignment.End) {
+                (4 downTo 0).forEach { tick ->
+                    val value = axis.low + (axis.high - axis.low) * tick / 4.0
+                    Text(if (percentMode) percentAxisText(value, axis.high - axis.low)
+                        else compactVoteAxis(value),
+                        fontSize = 10.sp, color = Secundario, maxLines = 1)
                 }
             }
-            val gridLineColor = Borda
-            val markerFill = LocalAppPalette.current.surface
-            Canvas(Modifier.weight(1f).fillMaxHeight()) {
-                val insetTop = 7.dp.toPx()
-                val insetBottom = 7.dp.toPx()
-                val graphHeight = (size.height - insetTop - insetBottom).coerceAtLeast(1f)
-                val graphWidth = size.width.coerceAtLeast(1f)
-                val startTime = points.first().moment
-                val elapsed = (points.last().moment - startTime).coerceAtLeast(1L)
-                fun x(index: Int): Float = if (points.size == 1) graphWidth / 2f else
-                    ((points[index].moment - startTime).toFloat() / elapsed)
-                        .coerceIn(0f, 1f) * graphWidth
-                fun y(percent: Double): Float = insetTop + graphHeight *
-                    (1.0 - percent.coerceIn(0.0, 100.0) / 100.0).toFloat()
-
-                // Eixo fixo 0–100%: não exagera visualmente variações pequenas.
-                listOf(0.0, 25.0, 50.0, 75.0, 100.0).forEach { tick ->
-                    val py = y(tick)
-                    drawLine(gridLineColor, Offset(0f, py), Offset(graphWidth, py),
-                        strokeWidth = 1.dp.toPx())
-                }
-                fun plot(tint: Color, getValue: (ProjectionPercentPoint) -> Double) {
-                    val path = Path()
-                    points.forEachIndexed { index, point ->
-                        val px = x(index)
-                        val py = y(getValue(point))
-                        if (index == 0) path.moveTo(px, py) else path.lineTo(px, py)
+            Box(Modifier.weight(1f).fillMaxHeight()
+                .clip(RoundedCornerShape(10.dp))
+                .background(darkSurface.copy(alpha = 0.08f))
+                .onSizeChanged { viewportPx = it.width.toFloat().coerceAtLeast(1f) }
+                .transformable(state = transform, canPan = { zoom > 1.01f })
+            ) {
+                Canvas(Modifier.fillMaxSize().pointerInput(zoom, centerIndex, history.size) {
+                    detectTapGestures { tap ->
+                        val step = if (history.size <= 1) 1f
+                            else size.width.toFloat() / history.lastIndex * zoom
+                        val approx = centerIndex + (tap.x - size.width / 2f) / step
+                        selectedIndex = kotlin.math.round(approx).toInt().coerceIn(0, history.lastIndex)
                     }
-                    if (points.size > 1) {
-                        drawPath(path, tint, style = Stroke(
-                            width = 2.8.dp.toPx(), cap = StrokeCap.Round))
+                }) {
+                    val width = size.width.coerceAtLeast(1f)
+                    val top = 11.dp.toPx()
+                    val bottom = size.height - 11.dp.toPx()
+                    val height = (bottom - top).coerceAtLeast(1f)
+                    val span = (axis.high - axis.low).coerceAtLeast(0.0000001)
+                    val step = if (history.size <= 1) 0f else width / history.lastIndex * zoom
+                    fun px(i: Int): Float = if (history.size <= 1) width / 2f
+                        else width / 2f + (i - centerIndex) * step
+                    fun py(value: Double): Float = top +
+                        ((axis.high - value) / span).toFloat() * height
+                    // Grade tracejada e linha vertical do registro selecionado.
+                    val guideStyle = PathEffect.dashPathEffect(
+                        floatArrayOf(5.dp.toPx(), 6.dp.toPx()))
+                    (0..4).forEach { n ->
+                        val at = top + height * n / 4f
+                        drawLine(grid, Offset(0f, at), Offset(width, at),
+                            strokeWidth = 0.9.dp.toPx(), pathEffect = guideStyle)
                     }
-                    val lastIndex = points.lastIndex
-                    val marker = Offset(x(lastIndex), y(getValue(points[lastIndex])))
-                    drawCircle(markerFill, radius = 5.4.dp.toPx(), center = marker)
-                    drawCircle(tint, radius = 3.4.dp.toPx(), center = marker)
+                    val selectionX = px(selectedIndex)
+                    if (selectionX >= 0 && selectionX <= width) {
+                        drawLine(textSecondary.copy(alpha = 0.6f), Offset(selectionX, top),
+                            Offset(selectionX, bottom), strokeWidth = 1.dp.toPx(),
+                            pathEffect = guideStyle)
+                    }
+                    fun plot(tint: Color, dashed: Boolean,
+                             value: (EvolutionPoint) -> Double) {
+                        val path = Path()
+                        var drawn = false
+                        (start..end).forEach { index ->
+                            val x = px(index)
+                            val y = py(value(history[index]))
+                            if (!x.isFinite() || !y.isFinite()) return@forEach
+                            if (!drawn) { path.moveTo(x, y); drawn = true }
+                            else path.lineTo(x, y)
+                        }
+                        if (drawn && end > start) {
+                            drawPath(path, color = tint, style = Stroke(
+                                width = if (dashed) 2.8.dp.toPx() else 3.3.dp.toPx(),
+                                cap = StrokeCap.Round,
+                                pathEffect = if (dashed) PathEffect.dashPathEffect(
+                                    floatArrayOf(11.dp.toPx(), 7.dp.toPx())) else null
+                            ))
+                        }
+                        // Pontos menores ao longo das etapas e destaque no selecionado.
+                        if (history.size <= 36) (start..end).forEach { i ->
+                            val x = px(i); val y = py(value(history[i]))
+                            if (x in 0f..width && y.isFinite()) {
+                                drawCircle(tint, radius = 2.7.dp.toPx(), center = Offset(x, y))
+                            }
+                        }
+                        if (selectionX in 0f..width) {
+                            val pointY = py(value(history[selectedIndex]))
+                            if (pointY.isFinite()) {
+                                drawCircle(darkSurface, radius = 6.6.dp.toPx(),
+                                    center = Offset(selectionX, pointY))
+                                drawCircle(tint, radius = if (dashed) 6.1.dp.toPx() else 4.1.dp.toPx(),
+                                    center = Offset(selectionX, pointY),
+                                    style = if (dashed) Stroke(2.4.dp.toPx())
+                                    else androidx.compose.ui.graphics.drawscope.Fill)
+                            }
+                        }
+                    }
+                    if (percentMode) {
+                        plot(colorA, false) { p -> p.projectedA / (p.projectedA + p.projectedB) * 100.0 }
+                        plot(colorB, false) { p -> p.projectedB / (p.projectedA + p.projectedB) * 100.0 }
+                    } else {
+                        plot(colorA, false) { it.observedA }
+                        plot(colorB, false) { it.observedB }
+                        plot(colorA, true) { it.projectedA }
+                        plot(colorB, true) { it.projectedB }
+                    }
+                    if (percentMode && selectionX in 0f..width) {
+                        val yA = py(selected.projectedA / selectedSum * 100.0)
+                        val yB = py(selected.projectedB / selectedSum * 100.0)
+                        if (kotlin.math.abs(yA - yB) < 6.dp.toPx()) {
+                            // Marcadores concêntricos: empate/valores quase iguais continuam
+                            // mostrando DUAS cores, sem falsificar as coordenadas das linhas.
+                            val y = (yA + yB) / 2f
+                            drawCircle(colorA, radius = 9.dp.toPx(),
+                                center = Offset(selectionX, y), style = Stroke(2.dp.toPx()))
+                            drawCircle(colorB, radius = 4.dp.toPx(),
+                                center = Offset(selectionX, y))
+                        }
+                    }
                 }
-                plot(colorA) { it.a }
-                plot(colorB) { it.b }
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("Início: ${smallTime(points.first().moment)}", fontSize = 11.sp, color = Secundario)
-            Text("Última: ${smallTime(points.last().moment)}", fontSize = 11.sp, color = Secundario)
+            Text(if (history.first().percentage > 0 && history.last().percentage > 0)
+                "Início: ${percentage(history.first().percentage)} das seções"
+                else "Início: ${smallTime(history.first().moment)}",
+                fontSize = 11.sp, color = Secundario)
+            Text(if (history.last().percentage > 0)
+                "Fim: ${percentage(history.last().percentage)}"
+                else "Última: ${smallTime(history.last().moment)}",
+                fontSize = 11.sp, color = Secundario)
         }
-        Text("A escala vai de 0% a 100%. As duas linhas somam 100% dos votos válidos projetados.",
-            fontSize = 11.sp, color = Secundario)
+        // Informações exatas evitam interpretações incorretas quando dois pontos coincidirem.
+        Surface(shape = RoundedCornerShape(14.dp), color = darkSurface,
+            border = BorderStroke(1.dp, Borda)) {
+            Column(Modifier.fillMaxWidth().padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Registro selecionado • ${clockTime(selected.moment)}" +
+                    if (selected.percentage > 0) " • ${percentage(selected.percentage)} das seções" else "",
+                    fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
+                Text("${nameA}: ${percentage(selected.projectedA / selectedSum * 100)} projetados • " +
+                    "${count(selected.observedA)} apurados • ${count(selected.projectedA)} votos projetados",
+                    color = colorA, fontSize = 11.sp, lineHeight = 17.sp)
+                Text("${nameB}: ${percentage(selected.projectedB / selectedSum * 100)} projetados • " +
+                    "${count(selected.observedB)} apurados • ${count(selected.projectedB)} votos projetados",
+                    color = colorB, fontSize = 11.sp, lineHeight = 17.sp)
+            }
+        }
+        Text("Amplie com dois dedos ou use +/−. Com zoom ativo, arraste para ver registros " +
+            "anteriores e toque em um ponto para conferir os números. Escala vertical automática; " +
+            "o zoom não altera os dados.", fontSize = 11.sp, color = textSecondary)
     }
 }
 
