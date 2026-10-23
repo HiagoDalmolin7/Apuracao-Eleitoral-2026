@@ -726,6 +726,28 @@ class ProjectionNotificationService : Service() {
         }
     }
 
+    // O sistema só deve receber um pedido de destaque durante uma atividade
+    // efetivamente em andamento: acompanhamento iniciado pelo usuário, dados do TSE
+    // e seções ainda em apuração. No modo manual / sem votos / após 100%,
+    // permanece a notificação comum do serviço.
+    private fun activeTseCount(): Boolean {
+        if (preferences.getString("eleicao_2026", "presidente") == "governador") {
+            val uf = preferences.getString("governador_uf_2026", "AC") ?: "AC"
+            val report = preferences.getString("tse_gov_json_$uf", null)
+                ?.let { parseGovernorReport(it, uf) }
+            return report?.hasVotes == true && report.sectionsPercent < 100.0
+        }
+        if (preferences.getBoolean("modo_manual", false)) return false
+        val report = preferences.getString("tse_json_BR", null)
+            ?.let { parseTseReport(it, "BR") }
+        if (report != null) return report.hasVotes && report.sectionsPercent < 100.0
+        return (UFS + "ZZ").any { uf ->
+            preferences.getString("tse_json_$uf", null)
+                ?.let { parseTseReport(it, uf) }
+                ?.let { it.hasVotes && it.sectionsPercent < 100.0 } == true
+        }
+    }
+
     private fun makeNotification(): Notification {
         val (heading, line) = currentProjection()
         val openApp = PendingIntent.getActivity(
@@ -738,7 +760,7 @@ class ProjectionNotificationService : Service() {
             Intent(this, ProjectionNotificationService::class.java).setAction(PROJECTION_STOP_ACTION),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        return Notification.Builder(this, PROJECTION_CHANNEL)
+        val builder = Notification.Builder(this, PROJECTION_CHANNEL)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle(heading)
             .setContentText(line)
@@ -746,9 +768,20 @@ class ProjectionNotificationService : Service() {
             .setContentIntent(openApp)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setCategory(Notification.CATEGORY_STATUS)
+            .setCategory(Notification.CATEGORY_EVENT)
             .addAction(Notification.Action.Builder(null, "Encerrar", stop).build())
-            .build()
+
+        // Android 16 QPR2 (36.1) ou mais novo oferece Live Updates.
+        // A Samsung decide se promove esta notificação à Now Bar.
+        // Em versões anteriores do Android a notificação normal é preservada.
+        if (Build.VERSION.SDK_INT >= 36 &&
+            Build.VERSION.SDK_INT_FULL >= Build.VERSION_CODES_FULL.BAKLAVA_1 &&
+            activeTseCount()
+        ) {
+            builder.setRequestPromotedOngoing(true)
+            builder.setShortCriticalText("TSE")
+        }
+        return builder.build()
     }
 
     private fun currentProjection(): Pair<String, String> {
