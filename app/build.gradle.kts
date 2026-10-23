@@ -36,7 +36,12 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.animation:animation")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.0")
+
+    // Blur real da pílula flutuante, compatível com Jetpack Compose.
+    implementation("dev.chrisbanes.haze:haze:2.0.1")
+    implementation("dev.chrisbanes.haze:haze-blur:2.0.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
