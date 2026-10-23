@@ -43,6 +43,14 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.view.WindowCompat
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -54,9 +62,11 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -96,6 +106,12 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
+import dev.chrisbanes.haze.blur.hazeBlur
+import dev.chrisbanes.haze.blur.HazeBlurStyle
+import dev.chrisbanes.haze.blur.HazeColorEffect
 
 // Cores identificadoras dos candidatos. Números e percentuais permanecem pretos.
 private val Verde = Color(0xFF198754)
@@ -890,7 +906,7 @@ private fun ElectionApp() {
     val statusInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val topChromeHeight = statusInset + 64.dp
-    val bottomChromeHeight = navInset + 76.dp
+    val bottomChromeHeight = navInset + 84.dp
     val scrollDistancePx = with(density) { 104.dp.toPx() }
     var chromeVisible by remember { mutableFloatStateOf(1f) }
     val chromeNestedScroll = remember(scrollDistancePx, showOptions) {
@@ -925,6 +941,8 @@ private fun ElectionApp() {
     }
     LaunchedEffect(tab, electionMode) { chromeVisible = 1f }
     // O blur segue a posição real da folha modal, inclusive quando arrastada para fechar.
+    // Efeito vidro nativo: o conteúdo por trás da pílula vira fonte de blur.
+    val dockHazeState = rememberHazeState()
     val optionsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val sheetScope = rememberCoroutineScope()
     var sheetHeightPx by remember { mutableFloatStateOf(0f) }
@@ -1276,9 +1294,7 @@ private fun ElectionApp() {
                         windowInsets = WindowInsets(0, 0, 0, 0),
                         title = {
                             Column(
-                                modifier = Modifier.clip(RoundedCornerShape(8.dp))
-                                    .clickable { showOptions = true }
-                                    .padding(vertical = 3.dp),
+                                modifier = Modifier.padding(vertical = 3.dp),
                                 verticalArrangement = Arrangement.spacedBy(2.dp)
                             ) {
                                 Text("Apuração Eleitoral 2026", fontWeight = FontWeight.Bold,
@@ -1311,28 +1327,6 @@ private fun ElectionApp() {
                                     }
                                 }
                             }
-                            IconButton(
-                                onClick = { showOptions = true },
-                                modifier = Modifier.size(48.dp)
-                                    .semantics { contentDescription = "Abrir menu de opções" }
-                            ) {
-                                Box(
-                                    Modifier.size(38.dp).clip(CircleShape)
-                                        .background(Color(0xFFF0F3F8)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    // Três círculos vetoriais centrados geometricamente,
-                                    // sem depender do alinhamento da fonte do caractere ⋮.
-                                    Canvas(Modifier.size(20.dp)) {
-                                        val cx = size.width / 2f
-                                        val cy = size.height / 2f
-                                        val radius = size.width * 0.065f
-                                        for (n in -1..1) {
-                                            drawCircle(Tinta, radius, Offset(cx, cy + n * size.height * 0.27f))
-                                        }
-                                    }
-                                }
-                            }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
                         )
@@ -1340,36 +1334,12 @@ private fun ElectionApp() {
                     }
                 }
             },
-            bottomBar = {
-                Box(Modifier.fillMaxWidth().height(bottomChromeHeight * chromeVisible).clipToBounds()) {
-                    Surface(
-                        modifier = Modifier.align(Alignment.BottomCenter)
-                            .requiredHeight(bottomChromeHeight).graphicsLayer {
-                            translationY = (1f - chromeVisible) * with(density) { 72.dp.toPx() }
-                            alpha = chromeVisible
-                        },
-                        color = Color.White, shadowElevation = 8.dp
-                    ) {
-                        Row(
-                        modifier = Modifier.fillMaxWidth().navigationBarsPadding()
-                            .padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        listOf("Painel", "Estados", "Mapa", "Gráfico", "Estat.").forEachIndexed { index, label ->
-                            BottomTab(label, index, tab == index, {
-                                tab = index
-                                chromeVisible = 1f
-                            }, Modifier.weight(1f))
-                        }
-                        }
-                    }
-                }
-            }
+            bottomBar = {}
         ) { padding ->
             // Dissolução discreta do conteúdo nas extremidades. Conforme as barras
             // recolhem, o efeito aumenta e mantém os ícones do sistema legíveis.
-            Box(Modifier.fillMaxSize().drawWithContent {
+            Box(Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxSize().hazeSource(dockHazeState).drawWithContent {
                 drawContent()
                 val opacity = (1f - chromeVisible) * 0.93f
                 if (opacity > 0.01f) {
@@ -1388,6 +1358,21 @@ private fun ElectionApp() {
                     )
                 }
             }) {
+            AnimatedContent(
+                targetState = tab,
+                modifier = Modifier.fillMaxSize(),
+                transitionSpec = {
+                    val direction = if (targetState > initialState)
+                        AnimatedContentTransitionScope.SlideDirection.Left
+                    else AnimatedContentTransitionScope.SlideDirection.Right
+                    val entering = slideIntoContainer(direction, animationSpec = tween(310)) +
+                        fadeIn(animationSpec = tween(200))
+                    val leaving = slideOutOfContainer(direction, animationSpec = tween(310)) +
+                        fadeOut(animationSpec = tween(170))
+                    entering togetherWith leaving
+                },
+                label = "Transição horizontal das páginas"
+            ) { pageTab ->
             if (electionMode == "governador") {
                 val stateReport = governorReports[selectedGovernorUF]
                 val govStatus = when {
@@ -1396,7 +1381,7 @@ private fun ElectionApp() {
                     governorFailed.isNotEmpty() -> "Última sincronização: ${clockTime(governorLastGood)} • fontes indisponíveis: ${governorFailed.sorted().joinToString()}"
                     else -> "Dados TSE: ${clockTime(governorLastGood)} • atualização a cada 60 s"
                 }
-                when (tab) {
+                when (pageTab) {
                     0 -> GovernorDashboard(
                         Modifier.padding(padding), selectedGovernorUF, stateReport,
                         governorReports, govStatus,
@@ -1425,7 +1410,7 @@ private fun ElectionApp() {
                     else -> GovernorStatistics(Modifier.padding(padding), selectedGovernorUF, stateReport, govStatus)
                 }
             } else if (manualMode) {
-                when (tab) {
+                when (pageTab) {
                     0 -> ManualDashboard(
                         modifier = Modifier.padding(padding),
                         candidateA = labelsA, candidateB = labelsB,
@@ -1466,7 +1451,7 @@ private fun ElectionApp() {
                     )
                 }
             } else {
-                when (tab) {
+                when (pageTab) {
                     0 -> OfficialDashboard(
                         modifier = Modifier.padding(padding),
                         candidateA = labelsA, candidateB = labelsB,
@@ -1509,7 +1494,41 @@ private fun ElectionApp() {
                     )
                 }
             }
-            } // Área de conteúdo edge-to-edge com fade nas bordas
+            } // AnimatedContent
+            } // Conteúdo com fade nas bordas
+            // Dock flutuante sobre o conteúdo, não retângulo de ponta a ponta.
+            // Continua retraindo junto ao gesto de rolagem da versão anterior.
+            Box(
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                    .height(bottomChromeHeight * chromeVisible).clipToBounds()
+            ) {
+                Box(
+                    Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                        .requiredHeight(bottomChromeHeight)
+                        .graphicsLayer {
+                            translationY = (1f - chromeVisible) * with(density) { 78.dp.toPx() }
+                            alpha = chromeVisible
+                        }
+                ) {
+                    GlassNavigationPill(
+                        selected = tab,
+                        onTabSelected = { next ->
+                            if (tab != next) tab = next
+                            chromeVisible = 1f
+                        },
+                        onSettings = {
+                            chromeVisible = 1f
+                            showOptions = true
+                        },
+                        modifier = Modifier.align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .padding(start = 15.dp, end = 15.dp, bottom = navInset + 8.dp),
+                        hazeState = dockHazeState
+                    )
+                }
+            }
+            } // Área de conteúdo e dock
+
         }
     }
 }
@@ -1848,43 +1867,113 @@ private fun ManualStatistics(modifier: Modifier, states: Map<String, StateData>,
     }
 }
 
+// Pílula flutuante: cinco destinos e o menu de configurações na sexta posição.
+// O fundo realmente desfoca o conteúdo marcado como hazeSource atrás da navegação.
 @Composable
-private fun BottomTab(
+private fun GlassNavigationPill(
+    selected: Int,
+    onTabSelected: (Int) -> Unit,
+    onSettings: () -> Unit,
+    hazeState: dev.chrisbanes.haze.HazeState,
+    modifier: Modifier = Modifier
+) {
+    val shape = RoundedCornerShape(100.dp)
+    val glassStyle = remember {
+        HazeBlurStyle {
+            blurRadius(17.dp)
+            noiseFactor(0.035f)
+            colorEffects(listOf(HazeColorEffect.tint(Color.White.copy(alpha = 0.64f))))
+            fallbackColorEffect(HazeColorEffect.tint(Color.White.copy(alpha = 0.93f)))
+        }
+    }
+    BoxWithConstraints(
+        modifier = modifier.height(66.dp).shadow(16.dp, shape, clip = false)
+            .clip(shape)
+            .hazeBlur(input = HazeInput.Sources(hazeState), style = glassStyle)
+            .background(Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.20f), Color.White.copy(alpha = 0.05f))))
+            .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.85f)), shape)
+    ) {
+        val inset = 5.dp
+        val widthPerItem = (maxWidth - inset * 2) / 6
+        val selectedOffset by animateDpAsState(
+            targetValue = inset + widthPerItem * selected.coerceIn(0, 4),
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioNoBouncy,
+                stiffness = Spring.StiffnessMediumLow
+            ),
+            label = "Indicador deslizando pela pílula"
+        )
+        Box(
+            Modifier.offset(x = selectedOffset, y = 5.dp)
+                .width(widthPerItem).height(56.dp)
+                .padding(horizontal = 2.dp)
+                .clip(RoundedCornerShape(30.dp))
+                .background(Brush.verticalGradient(listOf(
+                    Azul.copy(alpha = 0.16f), Azul.copy(alpha = 0.07f)
+                )))
+                .border(1.dp, Color.White.copy(alpha = 0.74f), RoundedCornerShape(30.dp))
+        )
+        Row(
+            modifier = Modifier.fillMaxSize().padding(horizontal = inset),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            listOf("Painel", "Estados", "Mapa", "Gráfico", "Estat.").forEachIndexed { index, name ->
+                GlassDockItem(
+                    name = name,
+                    index = index,
+                    selected = selected == index,
+                    onClick = { onTabSelected(index) },
+                    modifier = Modifier.width(widthPerItem).fillMaxHeight()
+                )
+            }
+            Box(
+                modifier = Modifier.width(widthPerItem).fillMaxHeight()
+                    .clip(RoundedCornerShape(28.dp))
+                    .clickable(onClick = onSettings)
+                    .semantics { contentDescription = "Abrir opções da apuração" },
+                contentAlignment = Alignment.Center
+            ) {
+                Canvas(Modifier.size(22.dp)) {
+                    val x = size.width / 2f
+                    val centerY = size.height / 2f
+                    for (step in -1..1) {
+                        drawCircle(color = Tinta, radius = size.width * 0.068f,
+                            center = Offset(x, centerY + step * size.height * 0.26f))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GlassDockItem(
     name: String,
     index: Int,
-    active: Boolean,
+    selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val tint = if (active) Azul else Secundario
     Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
+        modifier = modifier.clip(RoundedCornerShape(28.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 2.dp, vertical = 6.dp),
+            .semantics { contentDescription = "Aba $name" },
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        verticalArrangement = Arrangement.Center
     ) {
-        Box(
-            modifier = Modifier.width(54.dp).height(32.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(if (active) Color(0xFFEAF0FB) else Color.Transparent),
-            contentAlignment = Alignment.Center
-        ) {
-            BottomTabSymbol(index, tint)
+        BottomTabSymbol(index, if (selected) Azul else Secundario)
+        if (selected) {
+            Spacer(Modifier.height(3.dp))
+            Text(
+                text = name,
+                fontSize = 9.sp,
+                lineHeight = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Tinta,
+                maxLines = 1,
+                overflow = TextOverflow.Clip
+            )
         }
-        Text(
-            text = name,
-            fontSize = 10.sp,
-            lineHeight = 13.sp,
-            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-            color = tint,
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
     }
 }
 
@@ -1959,7 +2048,8 @@ private fun BottomTabSymbol(index: Int, tint: Color) {
 @Composable
 private fun ContentColumn(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Column(
-        modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 16.dp),
+        modifier.fillMaxSize().verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 102.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
         content = content
     )
