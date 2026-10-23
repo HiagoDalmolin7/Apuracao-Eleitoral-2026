@@ -68,6 +68,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.snap
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -112,6 +113,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.CornerRadius
@@ -1434,6 +1436,7 @@ private fun ElectionApp() {
     // A posição permanece estável mesmo durante gestos rápidos e mudanças de layout.
     var windowHeightPx by remember { mutableFloatStateOf(0f) }
     var sheetGesturePx by remember { mutableFloatStateOf(0f) }
+    var sheetDragging by remember { mutableStateOf(false) }
     var sheetExpandedToTop by remember { mutableStateOf(false) }
     var closingOptions by remember { mutableStateOf(false) }
     val sheetReveal by remember(showOptions, optionsSheetState) {
@@ -1449,9 +1452,12 @@ private fun ElectionApp() {
     }
     // A cor e o desfoque seguem a posição do pop-up, mas a interpolação evita
     // mudanças abruptas quando o modal termina de sair da composição.
+    val dragReveal = sheetReveal *
+        (1f - sheetGesturePx.coerceAtLeast(0f) / windowHeightPx.coerceAtLeast(1f))
+            .coerceIn(0f, 1f)
     val visibleOverlay by animateFloatAsState(
-        targetValue = sheetReveal,
-        animationSpec = tween(durationMillis = 130),
+        targetValue = dragReveal,
+        animationSpec = if (sheetDragging) snap() else tween(durationMillis = 130),
         label = "Fundo do menu"
     )
     fun dismissOptions() {
@@ -1464,24 +1470,29 @@ private fun ElectionApp() {
             } finally {
                 showOptions = false
                 sheetGesturePx = 0f
+                sheetDragging = false
                 sheetExpandedToTop = false
                 closingOptions = false
             }
         }
     }
-    fun finishSheetDrag() {
-        val upThreshold = with(density) { 48.dp.toPx() }
-        val downThreshold = with(density) { 68.dp.toPx() }
-        when {
-            sheetGesturePx < -upThreshold -> sheetExpandedToTop = true
-            sheetGesturePx > downThreshold && sheetExpandedToTop -> sheetExpandedToTop = false
-            sheetGesturePx > downThreshold -> dismissOptions()
+    fun finishSheetDrag(velocityYPxPerSecond: Float) {
+        val action = resolveSheetSwipe(sheetGesturePx, velocityYPxPerSecond, density.density)
+        sheetDragging = false
+        when (action) {
+            SheetSwipeAction.Close -> {
+                // Mesmo expandido até o topo, este MESMO arrasto fecha o modal.
+                // Manter o deslocamento visível até o hide evita um salto.
+                dismissOptions()
+            }
+            SheetSwipeAction.Expand -> {
+                sheetExpandedToTop = true
+                sheetGesturePx = 0f
+            }
+            SheetSwipeAction.Settle -> sheetGesturePx = 0f
         }
-        // Sem translationY e sem corrotinas de retorno concorrentes.
-        // Só uma animação de altura (StableExpandableSheetBody) controla a folha.
-        sheetGesturePx = 0f
     }
-    fun cancelSheetDrag() { sheetGesturePx = 0f }
+    fun cancelSheetDrag() { sheetDragging = false; sheetGesturePx = 0f }
     // O modo manual utiliza as mesmas chaves da versão original (uf_SC, uf_GO...).
     // Os arquivos oficiais ficam SOMENTE em tse_json_*, sem sobrescrever a digitação.
     var manualMode by remember { mutableStateOf(prefs.getBoolean("modo_manual", false)) }
@@ -1825,14 +1836,16 @@ private fun ElectionApp() {
                 sheetState = optionsSheetState,
                 onSheetHeight = { sheetHeightPx = it },
                 expandedToTop = sheetExpandedToTop,
+                onDragStarted = { sheetDragging = true; sheetGesturePx = 0f },
                 onDragBy = { delta ->
-                    // Drag para cima amplia a folha; para baixo recolhe ou fecha.
-                    // A rolagem da lista abaixo é independente deste detector.
+                    // Segue o dedo em tempo real, mesmo em gestos muito longos.
                     sheetGesturePx = (sheetGesturePx + delta)
-                        .coerceIn(-with(density) { 180.dp.toPx() }, with(density) { 180.dp.toPx() })
+                        .coerceIn(-windowHeightPx.coerceAtLeast(800f), windowHeightPx.coerceAtLeast(800f))
                 },
-                onDragFinished = { finishSheetDrag() },
+                onDragFinished = { velocity -> finishSheetDrag(velocity) },
                 onDragCancelled = { cancelSheetDrag() },
+                optionsDragOffsetPx = sheetGesturePx,
+                optionsDragging = sheetDragging,
                 electionMode = electionMode,
                 selectedGovernor = selectedGovernorUF,
                 automatic = !manualMode,
@@ -2355,6 +2368,31 @@ private fun PresidentialVictoryCelebrationDialog(
     }
 }
 
+// Fechar menus em um único gesto: a distância OU a velocidade decide o destino,
+// independentemente de a folha ter sido expandida até o topo. Não há etapa
+// obrigatória de recolhimento antes do fechamento.
+private enum class SheetSwipeAction { Close, Expand, Settle }
+
+private fun resolveSheetSwipe(
+    displacementPx: Float,
+    velocityYPxPerSecond: Float,
+    density: Float
+): SheetSwipeAction {
+    val downToClose = 70f * density
+    val upToExpand = 46f * density
+    val minFlingDrag = 16f * density
+    val flingVelocity = 1150f * density
+    return when {
+        displacementPx >= downToClose ||
+            (displacementPx >= minFlingDrag && velocityYPxPerSecond > flingVelocity) ->
+            SheetSwipeAction.Close
+        displacementPx <= -upToExpand ||
+            (displacementPx <= -minFlingDrag && velocityYPxPerSecond < -flingVelocity) ->
+            SheetSwipeAction.Expand
+        else -> SheetSwipeAction.Settle
+    }
+}
+
 // Estrutura compartilhada dos menus: a altura EXTERNA permanece fixa.
 // O fundo do painel alcança o rodapé edge-to-edge; os controles internos usam
 // navigationBarsPadding, sem aplicar novamente o inset no ModalBottomSheet.
@@ -2366,6 +2404,8 @@ private fun StableExpandableSheetBody(
     compactHeight: Dp,
     panelColor: Color,
     onTapOutsidePanel: () -> Unit,
+    dragOffsetPx: Float = 0f,
+    isDragging: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
     // O tamanho real do contêiner já considera a janela atual, inclusive rotação,
@@ -2380,10 +2420,20 @@ private fun StableExpandableSheetBody(
         animationSpec = tween(durationMillis = 275),
         label = "Expansão estável do menu"
     )
+    // Enquanto o dedo se move, o painel acompanha o deslocamento sem animação
+    // atrasada. Ao soltar antes do limiar, retorna suavemente à âncora atual.
+    val trackedDrag by animateFloatAsState(
+        targetValue = dragOffsetPx,
+        animationSpec = if (isDragging) snap() else tween(170, easing = FastOutSlowInEasing),
+        label = "Arrasto contínuo do pop-up"
+    )
+    val expandedByFinger = with(density) { (-trackedDrag.coerceAtMost(0f)).toDp() }
+    val drawnHeight = (panelHeight + expandedByFinger).coerceAtMost(fullHeight)
     Column(Modifier.fillMaxWidth().height(fullHeight)) {
         Spacer(Modifier.fillMaxWidth().weight(1f).clickable(onClick = onTapOutsidePanel))
         Column(
-            Modifier.fillMaxWidth().height(panelHeight)
+            Modifier.fillMaxWidth().height(drawnHeight)
+                .graphicsLayer { translationY = trackedDrag.coerceAtLeast(0f) }
                 .clip(RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp))
                 .background(panelColor),
             content = content
@@ -2403,9 +2453,12 @@ private fun ElectionOptionsSheet(
     sheetState: SheetState,
     onSheetHeight: (Float) -> Unit,
     expandedToTop: Boolean,
+    onDragStarted: () -> Unit,
     onDragBy: (Float) -> Unit,
-    onDragFinished: () -> Unit,
+    onDragFinished: (Float) -> Unit,
     onDragCancelled: () -> Unit,
+    optionsDragOffsetPx: Float,
+    optionsDragging: Boolean,
     electionMode: String,
     selectedGovernor: String,
     automatic: Boolean,
@@ -2442,16 +2495,23 @@ private fun ElectionOptionsSheet(
     val captionSize = 12.sp
 
     // Não reiniciar o detector a cada pixel arrastado: isso quebrava os gestos rápidos.
+    val latestDragStarted by rememberUpdatedState(onDragStarted)
     val latestDragBy by rememberUpdatedState(onDragBy)
     val latestDragFinished by rememberUpdatedState(onDragFinished)
     val latestDragCancelled by rememberUpdatedState(onDragCancelled)
     val dragGesture = Modifier.pointerInput(Unit) {
+        val tracker = VelocityTracker()
         detectVerticalDragGestures(
+            onDragStart = {
+                tracker.resetTracking()
+                latestDragStarted()
+            },
             onVerticalDrag = { change, amount ->
+                tracker.addPosition(change.uptimeMillis, change.position)
                 change.consume()
                 latestDragBy(amount)
             },
-            onDragEnd = { latestDragFinished() },
+            onDragEnd = { latestDragFinished(tracker.calculateVelocity().y) },
             onDragCancel = { latestDragCancelled() }
         )
     }
@@ -2480,7 +2540,9 @@ private fun ElectionOptionsSheet(
             expanded = expandedToTop,
             compactHeight = 650.dp,
             panelColor = panel.sheet,
-            onTapOutsidePanel = onDismiss
+            onTapOutsidePanel = onDismiss,
+            dragOffsetPx = optionsDragOffsetPx,
+            isDragging = optionsDragging
         ) {
             Column(
                 // A cor do painel continua por trás da barra de gestos;
@@ -2988,22 +3050,34 @@ private fun RegionPickerPill(
         }
         var pickerExpanded by remember { mutableStateOf(false) }
         var pickerDrag by remember { mutableFloatStateOf(0f) }
-        val dragThreshold = with(LocalDensity.current) { 60.dp.toPx() }
+        var pickerDragging by remember { mutableStateOf(false) }
+        val pickerDensity = LocalDensity.current.density
         val pickerDragGesture = Modifier.pointerInput(Unit) {
+            val tracker = VelocityTracker()
             detectVerticalDragGestures(
-                onVerticalDrag = { change, amount ->
-                    change.consume()
-                    pickerDrag = (pickerDrag + amount).coerceIn(-300f, 300f)
-                },
-                onDragEnd = {
-                    when {
-                        pickerDrag < -dragThreshold -> pickerExpanded = true
-                        pickerDrag > dragThreshold && pickerExpanded -> pickerExpanded = false
-                        pickerDrag > dragThreshold -> dismissPicker()
-                    }
+                onDragStart = {
+                    tracker.resetTracking()
+                    pickerDragging = true
                     pickerDrag = 0f
                 },
-                onDragCancel = { pickerDrag = 0f }
+                onVerticalDrag = { change, amount ->
+                    tracker.addPosition(change.uptimeMillis, change.position)
+                    change.consume()
+                    pickerDrag = (pickerDrag + amount).coerceIn(-2500f, 2500f)
+                },
+                onDragEnd = {
+                    val outcome = resolveSheetSwipe(pickerDrag, tracker.calculateVelocity().y, pickerDensity)
+                    pickerDragging = false
+                    when (outcome) {
+                        SheetSwipeAction.Close -> dismissPicker()
+                        SheetSwipeAction.Expand -> {
+                            pickerExpanded = true
+                            pickerDrag = 0f
+                        }
+                        SheetSwipeAction.Settle -> pickerDrag = 0f
+                    }
+                },
+                onDragCancel = { pickerDragging = false; pickerDrag = 0f }
             )
         }
         ModalBottomSheet(
@@ -3027,7 +3101,9 @@ private fun RegionPickerPill(
                 expanded = pickerExpanded,
                 compactHeight = 610.dp,
                 panelColor = palette.sheet,
-                onTapOutsidePanel = { dismissPicker() }
+                onTapOutsidePanel = { dismissPicker() },
+                dragOffsetPx = pickerDrag,
+                isDragging = pickerDragging
             ) {
                 // Lista termina acima da barrinha do sistema, sem deixar fundo transparente.
                 Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)
